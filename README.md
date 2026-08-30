@@ -11,7 +11,6 @@ __Использование скрипта установки__
 
 Скачайте файл, используя wget:
 ```bash
-```markdown
 wget https://github.com/DarkPain808/FreePBX_script_russian/blob/main/freepbx_debian_12.sh -O /tmp/freepbx_debian_12.sh
 ```
 
@@ -19,8 +18,6 @@ wget https://github.com/DarkPain808/FreePBX_script_russian/blob/main/freepbx_deb
 ```
 bash /tmp/freepbx_debian_12.sh
 ```
-
-
 
 __Аргументы, которые скрипт может принимать__
 
