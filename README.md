@@ -8,6 +8,7 @@ __Необходимо для установки:__
 - системы Debian 12.x
 
 __Использование скрипта установки__
+
 Скачайте файл, используя wget:
 ```bash
 wget https://github.com/DarkPain808/FreePBX_script_russian/blob/main/freepbx_debian_12.sh -O /tmp/freepbx_debian_12.sh
