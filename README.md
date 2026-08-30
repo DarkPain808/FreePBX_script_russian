@@ -10,12 +10,12 @@ __Необходимо для установки:__
 Скачайте файл, используя wget:
 ```bash
 wget https://github.com/DarkPain808/FreePBX-/blob/main/freepbx_debian_12.sh -O /tmp/freepbx_debian_12.sh
-
+```
 
 Выполните скрипт:
 ```bash
 bash /tmp/sng_freepbx_debian_install.sh
-
+```
 
 
 
