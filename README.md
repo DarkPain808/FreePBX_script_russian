@@ -18,7 +18,7 @@ wget https://github.com/DarkPain808/FreePBX_script_russian/blob/main/freepbx_deb
 ```
 bash /tmp/freepbx_debian_12.sh
 ```
-
+** **
 __Аргументы, которые скрипт может принимать__
 
 Обратите внимание на ДВА символа '--'.
