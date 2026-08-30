@@ -16,7 +16,7 @@ wget https://github.com/DarkPain808/FreePBX_script_russian/blob/main/freepbx_deb
 
 Выполните скрипт:
 ```
-bash /tmp/sng_freepbx_debian_install.sh
+bash /tmp/freepbx_debian_12.sh
 ```
 
 
