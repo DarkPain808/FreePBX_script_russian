@@ -13,8 +13,6 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
-# @author kgupta@sangoma.com
-#
 # Этот скрипт установки FreePBX и все концепции являются собственностью
 # Sangoma Technologies.
 # Скрипт можно свободно использовать только для установки FreePBX
