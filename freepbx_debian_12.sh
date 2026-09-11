@@ -1,1836 +1,1906 @@
 #!/bin/bash
 #####################################################################################
-#     FreePBX 17
+
+VERSION="1.0"
+export LC_ALL=C
+
 #####################################################################################
-# * Copyright 2024 by Sangoma Technologies
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 3.0
-# of the License, or (at your option) any later version.
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+#                 Скрипт установки FreePBX 17 на Debian 12 (bookworm)
 #
-# Этот скрипт установки FreePBX и все концепции являются собственностью
-# Sangoma Technologies.
-# Скрипт можно свободно использовать только для установки FreePBX
-# вместе с зависимыми пакетами, но он не даёт гарантий производительности
-# и используется на ваш страх и риск. Скрипт предоставляется БЕЗ ГАРАНТИЙ.
+# ВЕРСИЯ: 1.0
+# ОПУБЛИКОВАНО: 10 сентября 2026 года, 12:00 GMT
+# ЛИЦЕНЗИЯ: GNU General Public License v3.0
 #
-#####################################################################################
-#     Ключи для запуска скрипта
-#####################################################################################
-#  ./tmp/freepbx_debian_12.sh --dahdi
-#                             --testing
-#                             --nofreepbx
-#                             --noasterisk
-#                             --dahdi-only
-#                             --skipversion
-#                             --opensouceonly
+# ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ:
+# Содержимое предоставляется «как есть», без каких-либо гарантий,
+# явных или подразумеваемых. Вы можете изменять, распространять и использовать
+# этот скрипт; разработчик не несёт ответственности за любой ущерб или
+# проблемы, возникшие в результате использования.
+#
+# НАЗНАЧЕНИЕ:
+# Автоматизированная установка FreePBX 17 с минимальным ручным вмешательством.
+# Скрипт выполняет предустановочные проверки, настраивает окружение,
+# загружает и запускает официальный установщик FreePBX, а затем
+# проверяет корректность развёртывания.
+#
+# ВНИМАНИЕ:
+# Тщательно протестируйте скрипт в контролируемой среде перед
+# развёртыванием на production-сервере.
 #
 #####################################################################################
-#     Предварительная настройка
+#
+#    Команды запуска
+#
+#    bash Freepbx17_debian12.sh              Полная установка с screen и всеми проверками
+#    bash Freepbx17_debian12.sh --menu       Интерактивное меню из 15 пунктов
+#    bash Freepbx17_debian12.sh --full       Полная установка без меню, с индикацией шагов
+#
 #####################################################################################
 
-# Включаем строгий режим: скрипт немедленно завершится при любой ошибке команды
-set -e
 
-# -----------------------------------------------------------------------------------
-# Переменные
-# -----------------------------------------------------------------------------------
-SCRIPTVER="1.0"                        # Версия самого скрипта установки
-
-DEBIAN_OS_VERSION=""                   # Переменная для хранения кодового имени версии ОС Debian (например, bookworm, trixie)
-
-ASTVERSION=${ASTVERSION:-22}           # Версия Asterisk для установки (по умолчанию — 22)
-PHPVERSION="8.2"                       # Требуемая версия PHP для работы FreePBX
-NPM_MIRROR=""                          # Зеркало для NPM (может быть задано через параметр --npmmirror)
-
-DEBIAN_MIRROR="http://ftp.debian.org/debian"             # Зеркало репозитория Debian (по умолчанию — официальное зеркало)
-
-LOG_FOLDER="/var/log/pbx"              # Папка, где будут храниться логи процесса установки
-LOG_FILE="${LOG_FOLDER}/freepbx17-install-$(date '+%Y.%m.%d-%H.%M.%S').log"
-                                       # Имя файла лога: включает путь, название и временную метку (год.месяц.день-час.минута.секунда)
-log=$LOG_FILE                          # Удобная переменная-ссылка на файл лога
-
-# Фиксированный «безопасный» PATH: гарантирует, что скрипт будет использовать стандартные пути,
-# а не те, которые могли быть заданы в пользовательской сессии (особенно важно при запуске от root)
-SANE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Определяем версию ОС по файлу /etc/os-release: 
-# ищем строку VERSION_CODENAME= и берём значение после неё
-if [ -f /etc/os-release ]; then
-    DEBIAN_OS_VERSION=$(grep -oP '(?<=VERSION_CODENAME=).*' /etc/os-release)
-fi
-
-# Если версия не определена через os-release, пробуем определить по /etc/debian_version
-# (это запасной вариант для старых или минималистичных установок)
-if [ -z "$DEBIAN_OS_VERSION" ] && [ -f /etc/debian_version ]; then
-    case "$(cat /etc/debian_version)" in
-        12*|bookworm)
-            # Если версия начинается с 12 или явно указана как bookworm — это Debian 12
-            DEBIAN_OS_VERSION="bookworm"
-            ;;
-        13*|trixie)
-            # Если версия начинается с 13 или явно указана как trixie — это Debian 13
-            DEBIAN_OS_VERSION="trixie"
-            ;;
-        *)
-            # Во всех остальных случаях помечаем как unknown (неизвестная версия)
-            DEBIAN_OS_VERSION="unknown"
-            ;;
-    esac
-fi
-
-# Проверка совместимости ОС: поддерживается только Debian 12 (bookworm)
-if [ "$DEBIAN_OS_VERSION" != "bookworm" ]; then
-    echo "Unsupported OS version. This script supports only Debian 12 (bookworm). Detected: $DEBIAN_OS_VERSION"
-    exit 1
-fi
-
-# Проверка прав суперпользователя: скрипт должен запускаться от root (EUID = 0)
-if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root"
-   exit 1
-fi
-
-
-# Устанавливаем безопасный PATH для выполнения скрипта от root, чтобы не зависеть от пользовательских настроек
-export PATH=$SANE_PATH
-
-# -----------------------------------------------------------------------------------
-# Обрабатываем аргументы командной строки, переданные при запуске скрипта
-# -----------------------------------------------------------------------------------
-while [[ $# -gt 0 ]]; do
-	case $1 in
-		--dev)
-			# Режим разработки: устанавливаются дополнительные пакеты и компоненты для разработки
-			dev=true
-			shift # переходим к следующему аргументу
-			;;
-		--disable-deb-update-v13)
-			# Только обновить репозитории и заблокировать переход на Debian 13 (Trixie), без установки FreePBX
-			disableDebUpdateToV13=true
-			shift
-			;;
-		--testing)
-			# Использовать тестовый репозиторий FreePBX вместо стабильного
-			testrepo=true
-			shift
-			;;
-		--nofreepbx)
-			# Пропустить установку FreePBX (например, если нужно только настроить Asterisk)
-			nofpbx=true
-			shift
-			;;
-		--noasterisk)
-			# Пропустить установку Asterisk
-			noast=true
-			shift
-			;;
-		--opensourceonly)
-			# Установить только открытые (бесплатные) модули FreePBX, исключить коммерческие
-			opensourceonly=true
-			shift
-			;;
-		--noaac)
-			# Не устанавливать кодек AAC (libfdk-aac2)
-			noaac=true
-			shift
-			;;
-		--skipversion)
-			# Пропустить проверку версии скрипта на GitHub
-			skipversion=true
-			shift
-			;;
-		--dahdi)
-			# Включить поддержку DAHDI (для телефонии через платы)
-			dahdi=true
-			shift
-			;;
-		--dahdi-only)
-			# Установка только DAHDI без FreePBX и Asterisk (для настройки оборудования)
-			nofpbx=true
-			noast=true
-			noaac=true
-			dahdi=true
-			shift
-			;;
-		--nochrony)
-			# Не устанавливать и не настраивать chrony (синхронизацию времени)
-			nochrony=true
-			shift
-			;;
-		--debianmirror)
-			# Указать альтернативное зеркало репозитория Debian
-			DEBIAN_MIRROR=$2
-			shift; shift # пропускаем и параметр, и его значение
-			;;
-    --npmmirror)
-      # Указать альтернативное зеркало для NPM
-      NPM_MIRROR=$2
-      shift; shift
-      ;;
-		-*)
-			# Если передан неизвестный параметр (начинается с -), выводим ошибку и завершаем скрипт
-			echo "Unknown option $1"
-			exit 1
-			;;
-		*)
-			# Если передан аргумент без флага (не начинается с -), считаем его неизвестным
-			echo "Unknown argument \"$1\""
-			exit 1
-			;;
-	esac
-done
-
-# -----------------------------------------------------------------------------------
-# Функция для блокировки обновлений до Debian 13 (Trixie) через приоритеты APT
-# -----------------------------------------------------------------------------------
-block_debian13_trixie_update() {
-	cat >/etc/apt/preferences.d/99-block-trixie.pref <<'EOF'
-# Блокируем обновления до Debian 13 Trixie
-Package: *
-Pin: release n=trixie
-Pin-Priority: -1
-
-EOF
-}
-
-# -----------------------------------------------------------------------------------
-# Функция для исправления репозиториев: 
-# заменить stable на bookworm, stable-security на bookworm-security
-# -----------------------------------------------------------------------------------
-fix_debian12_repo() {
-	# --- Исправляем файлы sources.list, чтобы они указывали на bookworm ---
-	for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-		[ -f "$file" ] || continue
-		# Ищем строки с основным репозиторием Debian и заменяем «stable» на «bookworm»
-		if grep -qE "deb\s+$DEBIAN_MIRROR\s+stable\b" "$file"; then
-			sed -i.bak -E "s|(deb\s+$DEBIAN_MIRROR\s+)stable\b|\1bookworm|g" "$file"
-		fi
-
-	    # Ищем строки с репозиторием безопасности и заменяем «stable-security» на «bookworm-security»
-	    if grep -qE "deb\s+http://security\.debian\.org/debian-security\s+stable-security\b" "$file"; then
-		    sed -i.bak -E "s|(deb\s+http://security\.debian\.org/debian-security\s+)stable-security\b|\1bookworm-security|g" "$file"
-	    fi
-    done
-}
-
-# Если указан флаг --disable-deb-update-v13: обновляем репозитории, блокируем Trixie и завершаем работу
-if [ -n "$disableDebUpdateToV13" ]; then
-	    # Исправляем текущие репозитории Debian, чтобы они указывали на bookworm
-	    fix_debian12_repo
-	    # Блокируем обновления до Debian 13/Trixie, так как FreePBX пока поддерживает только Debian 12/Bookworm
-	    block_debian13_trixie_update
-	    echo "Debian repositories have been updated to use the Bookworm (Debian 12) sources."
-	    echo "The script is exiting now because the '--disable-deb-update-v13' option was used."
-	    echo "This option предназначен только для обновления источников APT без запуска полной установки."
-	    echo "To run the full installation, please re-run the script **without** the '--disable-deb-update-v13' option."
-	    exit 1
-fi
-
-# Создаём папку для логов (если её нет) и пустой файл лога
-mkdir -p "${LOG_FOLDER}"
-touch "${LOG_FILE}"
-
-# Перенаправляем стандартный поток ошибок (stderr, дескриптор 2) в файл лога.
-# Теперь все ошибки команд будут автоматически записываться в лог-файл.
-exec 2>>"${LOG_FILE}"
-
-# Функция сравнения версий с помощью утилиты dpkg --compare-versions
-compare_version() {
-        if dpkg --compare-versions "$1" "gt" "$2"; then
-                # Если первая версия больше второй
-                result=0
-        elif dpkg --compare-versions "$1" "lt" "$2"; then
-                # Если первая версия меньше второй
-                result=1
-        else
-                # Версии равны
-                result=2
-        fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки актуальности версии скрипта на GitHub
-# -----------------------------------------------------------------------------------
-check_version() {
-    # URL репозитория, где хранится последняя версия скрипта
-    REPO_URL="https://github.com/FreePBX/sng_freepbx_debian_install/raw/master"
-    # Скачиваем последнюю версию скрипта во временный файл
-    wget -O /tmp/sng_freepbx_debian_install_latest_from_github.sh "$REPO_URL/sng_freepbx_debian_install.sh" >> "$log"
-
-    # Извлекаем версию из скачанного файла (ищем строку SCRIPTVER="..." и берём значение)
-    latest_version=$(grep '^SCRIPTVER="' /tmp/sng_freepbx_debian_install_latest_from_github.sh | awk -F'"' '{print $2}')
-    # Вычисляем контрольную сумму (SHA‑256) скачанного файла
-    latest_checksum=$(sha256sum /tmp/sng_freepbx_debian_install_latest_from_github.sh | awk '{print $1}')
-
-    # Удаляем временный файл после использования
-    rm -f /tmp/sng_freepbx_debian_install_latest_from_github.sh
-
-    # Сравниваем текущую версию скрипта ($SCRIPTVER) с последней на GitHub ($latest_version)
-    compare_version $SCRIPTVER "$latest_version"
-
-    case $result in
-            0)
-                # Текущая версия скрипта новее, чем на GitHub
-                echo "Your version ($SCRIPTVER) of installation script is ahead of the latest version ($latest_version) as present on the GitHub. We recommend you to Download the version present in the GitHub."
-                echo "Use '$0 --skipversion' to skip the version check"
-                exit 1
-            ;;
-
-            1)
-                # Найдена более новая версия на GitHub
-                echo "A newer version ($latest_version) of installation script is available on GitHub. We recommend you to update it or use the latest one from the GitHub."
-                echo "Use '$0 --skipversion' to skip the version check."
-                exit 0
-            ;;
-
-            2)
-                # Версии совпадают — проверяем контрольную сумму, чтобы убедиться, что скрипт не был изменён локально
-                local_checksum=$(sha256sum "$0" | awk '{print $1}')
-                if [[ "$latest_checksum" != "$local_checksum" ]]; then
-                        # Контрольная сумма отличается — значит, локальный скрипт был изменён
-                        echo "Changes are detected between the local installation script and the latest installation script as present on GitHub. We recommend you to please use the latest installation script as present on GitHub."
-                        echo "Use '$0 --skipversion' to skip the version check"
-                        exit 0
-                else
-                        # Всё совпадает — скрипт актуален
-                        echo "Perfect! You're already running the latest version."
-                fi
-            ;;
-        esac
-}
-
-# -----------------------------------------------------------------------------------
-# Функции для логирования сообщений
-# -----------------------------------------------------------------------------------
-# Функция с временной меткой: выводит текущую дату и время, затем все переданные аргументы
-echo_ts() {
-	echo "$(date +"%Y-%m-%d %T") - $*"
-}
-
-# Простая функция логирования: добавляет сообщение в файл лога с временной меткой
-log() {
-	echo_ts "$*" >> "$LOG_FILE"
-}
-
-# Функция вывода сообщения: показывает текст в терминале и одновременно записывает в лог-файл
-message() {
-	echo_ts "$*" | tee -a "$LOG_FILE"
-}
-
-# -----------------------------------------------------------------------------------
-# Функция для фиксации и отображения текущего шага установки
-# -----------------------------------------------------------------------------------
-setCurrentStep () {
-	currentStep="$1"
-	message "${currentStep}"
-}
-
-# -----------------------------------------------------------------------------------
-# Функция завершения установки (используется при аварийном выходе)
-# -----------------------------------------------------------------------------------
-terminate() {
-	# Если код возврата не равен 0 (была ошибка), выводим последние 10 строк лога
-	if [ $? -ne 0 ]; then
-		echo_ts "Displaying last 10 lines from the log file"
-		tail -n 10 "$LOG_FILE"
-	fi
-	# Удаляем PID‑файл, если он существует (чтобы не было ложных пометок о работающем процессе)
-	rm -f "$pidfile"
-	message "Exiting script"
-}
-
-# Функция обработки ошибок: логирует факт сбоя, выводит сообщение и завершает скрипт
-errorHandler() {
-	log "****** INSTALLATION FAILED *****"
-	echo_ts "Installation failed at step ${currentStep}. Please check log ${LOG_FILE} for details."
-	# Записываем в лог: номер строки, код ошибки и последнюю выполненную команду
-	log "Error at line: $1 exiting with code $2 (last command was: $3)"
-	exit "$2"
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки, установлен ли пакет в системе
-# -----------------------------------------------------------------------------------
-isinstalled() {
-	# Получаем статус пакета через dpkg-query; ищем строку «install ok installed»
-	PKG_OK=$(dpkg-query -W --showformat='${Status}\n' "$@" 2>/dev/null | grep "install ok installed")
-	if [ "" = "$PKG_OK" ]; then
-		# Если ничего не найдено — пакет не установлен, возвращаем false
-		false
-	else
-		# Пакет установлен — возвращаем true
-		true
-	fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция установки пакета (с проверкой, логированием и обработкой ошибок)
-# -----------------------------------------------------------------------------------
-pkg_install() {
-    log "############################### "
-    PKG=("$@")  # Сохраняем все переданные аргументы как массив пакетов
-    if isinstalled "${PKG[@]}"; then
-        # Если пакет уже установлен — просто логируем это
-        log "${PKG[*]} already present ...."
-    else
-        # Выводим сообщение в терминал и пишем в лог о начале установки
-        message "Installing ${PKG[*]} ...."
-        # Устанавливаем пакеты через apt-get с флагами:
-        # -y — автоматически подтверждать установку
-        # --ignore-missing — игнорировать отсутствующие зависимости
-        # --force-confnew — при конфликте конфигов использовать новую версию
-        # --force-overwrite — разрешить перезапись файлов
-        apt-get -y --ignore-missing -o DPkg::Options::="--force-confnew" -o Dpkg::Options::="--force-overwrite" install "${PKG[@]}" >> "$log"
-
-        # Проверяем, действительно ли пакеты установились
-        if isinstalled "${PKG[@]}"; then
-            message "${PKG[*]} installed successfully...."
-        else
-            # Если установка не удалась — сообщаем об ошибке и инициируем завершение
-            message "${PKG[*]} failed to install ...."
-            message "Exiting the installation process as dependent ${PKG[*]} failed to install ...."
-            terminate
-        fi
-    fi
-    log "############################### "
-}
-
-# -----------------------------------------------------------------------------------
-# Функция установки Asterisk и зависимых модулей
-# -----------------------------------------------------------------------------------
-install_asterisk() {
-	astver=$1  # Переданная версия Asterisk (например, 22)
-
-	# Список модулей Asterisk, которые нужно установить
-	ASTPKGS=(
-		"addons"
-		"addons-bluetooth"
-		"addons-core"
-		"addons-mysql"
-		"addons-ooh323"
-		"core"
-		"curl"
-		"dahdi"
-		"doc"
-		"odbc"
-		"ogg"
-		"flite"
-		"g729"
-		"resample"
-		"snmp"
-		"speex"
-		"sqlite3"
-		"res-digium-phone"
-		"voicemail"
-	)
-
-	# Создаём директорию для музыки на удержании (MOH) — это обязательный каталог для Asterisk
-	mkdir -p /var/lib/asterisk/moh
-
-	# Устанавливаем основную версию Asterisk
-	pkg_install asterisk"$astver"
-
-	# В цикле устанавливаем все дополнительные модули из списка ASTPKGS
-	for i in "${!ASTPKGS[@]}"; do
-		pkg_install asterisk"$astver"-"${ASTPKGS[$i]}"
-	done
-
-	# Устанавливаем модули Asterisk, специфичные для FreePBX
-	pkg_install asterisk"$astver".0-freepbx-asterisk-modules
-	# Устанавливаем утилиту переключения версий Asterisk (если нужно переключаться между разными версиями)
-	pkg_install asterisk-version-switch
-	# Устанавливаем звуковые файлы (озвучку) для Asterisk (все доступные варианты)
-	pkg_install asterisk-sounds-*
-}
-
-# -----------------------------------------------------------------------------------
-# Функция настройки репозиториев для установки FreePBX и зависимостей
-# Использует российское зеркало: git.freepbx.asterisk.ru
-# -----------------------------------------------------------------------------------
-setup_repositories() {
-	# Удаляем старый GPG‑ключ Sangoma (если он есть), чтобы избежать конфликтов с новым ключом
-	apt-key del "9641 7C6E 0423 6E0A 986B  69EF DE82 7447 3C8D 0E52" >> "$log"
-
-	# Скачиваем и импортируем новый GPG‑ключ для репозитория FreePBX
-	wget -O - "http://git.freepbx.asterisk.ru/gpg/aptly-pubkey.asc" | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/freepbx.gpg  >> "$log"
-
-	# Выбираем URL репозитория в зависимости от режима (тестовый или стабильный)
-	if [ "$testrepo" ]; then
-		REPO_URL="http://git.freepbx.asterisk.ru/freepbx17-dev"
-	else
-		REPO_URL="http://git.freepbx.asterisk.ru/freepbx17-prod"
-	fi
-
-	# Формируем строку подключения репозитория FreePBX для Debian Bookworm
-	REPO_LINE="deb [arch=amd64] $REPO_URL bookworm main"
-	REPO_FILE="/etc/apt/sources.list"
-
-	# Добавляем репозиторий FreePBX, только если его ещё нет в sources.list
-	if ! grep -qsF "$REPO_LINE" "$REPO_FILE" 2>/dev/null; then
-		echo "$REPO_LINE" | tee -a "$REPO_FILE" >> "$log"
-		echo "Added FreePBX repo: $REPO_LINE" >> "$log"
-	else
-		echo "FreePBX repo already exists: $REPO_LINE" >> "$log"
-	fi
-
-	# Если не указан флаг --noaac, добавляем основной репозиторий Debian (включая non-free и non-free-firmware)
-	if [ -z "$noaac" ]; then
-	     # Формируем строку основного репозитория Debian Bookworm с нужными секциями
-	     REPO_LINE="deb $DEBIAN_MIRROR bookworm main non-free non-free-firmware"
-
-	     # Добавляем репозиторий, только если он ещё не присутствует
-	     if ! grep -qsF "$REPO_LINE" "$REPO_FILE"; then
-		     echo "$REPO_LINE" | tee -a "$REPO_FILE" >> "$log"
-		     echo "Added Bookworm main repo: $REPO_LINE" >> "$log"
-	     else
-		     echo "Bookworm main repo already exists: $REPO_LINE" >> "$log"
-	     fi			
-
-	    # Исправляем текущие репозитории Debian, чтобы они указывали на bookworm вместо stable
-	    fix_debian12_repo
-	    # Блокируем обновления до Debian 13/Trixie, так как FreePBX пока поддерживает только Debian 12/Bookworm
-	    block_debian13_trixie_update
-	fi
-
-	# Обновляем списки пакетов после добавления новых репозиториев
-	apt-get update >> "$log"
-
-	setCurrentStep "Setting up Sangoma repository"
-
-    local aptpref="/etc/apt/preferences.d/99sangoma-fpbx-repository"
-    # Создаём файл предпочтений APT, чтобы задать приоритет для пакетов из репозитория deb.freepbx.org
-    cat > "$aptpref" <<EOF
-Package: *
-Pin: origin deb.freepbx.org
-Pin-Priority: ${MIRROR_PRIO}
-EOF
-
-    # Если указан флаг --noaac, дополнительно понижаем приоритет пакета ffmpeg из репозитория FreePBX
-    if [ "$noaac" ]; then
-    cat >> "$aptpref" <<EOF
-
-Package: ffmpeg
-Pin: origin deb.freepbx.org
-Pin-Priority: 1
-EOF
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция создания скрипта, который запускается после каждой команды apt,
-# чтобы проверить и при необходимости обновить модули ядра для dahdi/wanpipe,
-# а также выполнить другие пост‑операции
-# -----------------------------------------------------------------------------------
-create_post_apt_script() {
-    # Проверяем, существует ли уже скрипт /usr/bin/post-apt-run. Если да — удаляем его, чтобы создать заново
-    if [ -e "/usr/bin/post-apt-run" ]; then
-        rm -f /usr/bin/post-apt-run
-    fi
-
-    message "Creating script to run post every apt command is finished executing"
-    {
-        echo "#!/bin/bash"
-        echo ""
-        # Если запущен процесс asterisk-version-switch, пропускаем выполнение скрипта,
-        # чтобы не конфликтовать с переключением версии Asterisk
-        echo "if pidof -x 'asterisk-version-switch' > /dev/null; then"
-	echo "echo \"Asterisk version switch process is running, skipping post-apt script.\""
-	echo "exit 0"
-	echo "fi"
-	echo ""
-        # Проверяем, установлен ли пакет dahdi-linux (модуль ядра для телефонии)
-        echo "dahdi_pres=\$(dpkg -l | grep dahdi-linux | wc -l)"
-        echo ""
-        # Если dahdi установлен, выполняем проверку и обновление модулей ядра под текущую версию ядра
-        echo "if [[ \$dahdi_pres -gt 0 ]]; then"
-	echo "    kernel_idx=\$(grep -v '^#' /etc/default/grub | grep GRUB_DEFAULT | cut -d '=' -f2 | tr -d '\"')"
-	echo ""
-	echo "    # Проверяем, содержит ли GRUB_DEFAULT символ '>' (формат с подменю, например '2>1')"
-	echo "    if [[ \"\$kernel_idx\" == *\">\"* ]]; then"
-	echo "        # Извлекаем индекс ядра после '>'"
-	echo "        selected_idx=\"\${kernel_idx#*>}\""
-	echo "        submenu_format=true"
-	echo "    else"
-	echo "        # Если это просто число — используем его напрямую"
-	echo "        selected_idx=\"\$kernel_idx\""
-	echo "        submenu_format=false"
-	echo "    fi"
-	echo ""
-	# Получаем список версий ядер, присутствующих в grub.cfg (ищем строки вида «Linux 6.1.0-21-amd64»)
-	echo "    kernel_pres=\$(grep -oP \"menuentry '.*?Linux \K[0-9.-]+(?=-amd64)\" /boot/grub/grub.cfg)"
-	echo "    kernel_count=\$(echo \"\$kernel_pres\" | wc -l)"
-	echo ""
-	# Проверяем, не выходит ли выбранный индекс за пределы количества доступных ядер
-	echo "    if [[ \"\$selected_idx\" -ge \"\$kernel_count\" ]]; then"
-	echo "        if \$submenu_format; then"
-	echo "            echo \"ERROR: GRUB_DEFAULT is set to '\$kernel_idx' (submenu index: \$selected_idx), but only \$kernel_count kernel entries are available.\""
-        echo "            echo \"       This likely refers to a non-existent kernel inside a submenu (e.g., 'Advanced options for Debian GNU/Linux').\""
-	echo "            echo \"       Please update /etc/default/grub to a valid submenu index between 0 and \$((kernel_count - 1)), then run: update-grub\""
-	echo "        else"
-	echo "            echo \"ERROR: GRUB_DEFAULT is set to '\$selected_idx', but only \$kernel_count kernel entries were found.\""
-	echo "            echo \"       Valid indices are between 0 and \$((kernel_count - 1)).\""
-	echo "            echo \"       Please update /etc/default/grub and run: update-grub\""
-	echo "        fi"
-	echo "        exit 1"
-	echo "    fi"
-	echo ""
-	echo "    idx=0"
-        # Перебираем найденные версии ядер и ищем ту, которая соответствует выбранному индексу в GRUB
-        echo "    for kernel in \$kernel_pres; do"
-        echo "        if [[ \$idx -ne \$selected_idx ]]; then"
-        echo "            idx=\$((idx+1))"
-        echo "            continue"
-        echo "        fi"
-        echo ""
-        echo "        logger \"Checking kernel modules for dahdi and wanpipe for kernel image \$kernel\""
-        echo ""
-        # Проверяем, установлены ли модули ядра dahdi и wanpipe именно для этой версии ядра
-        echo "        dahdi_kmod_pres=\$(dpkg -l | grep dahdi-linux-kmod | grep \$kernel | wc -l)"
-        echo "        wanpipe_kmod_pres=\$(dpkg -l | grep kmod-wanpipe | grep \$kernel | wc -l)"
-        echo ""
-        # Если оба модуля отсутствуют — планируем их обновление через at (через 1 минуту)
-        echo "        if [[ \$dahdi_kmod_pres -eq 0 ]] && [[ \$wanpipe_kmod_pres -eq 0 ]]; then"
-        echo "            logger \"Upgrading dahdi-linux-kmod-\$kernel and kmod-wanpipe-\$kernel\""
-        echo "            echo \"Please wait for approx 2 min once apt command execution is completed as dahdi-linux-kmod-\$kernel kmod-wanpipe-\$kernel update in progress\""
-        echo "            apt -y upgrade dahdi-linux-kmod-\$kernel kmod-wanpipe-\$kernel > /dev/null 2>&1 | at now +1 minute&"
-        echo "        elif [[ \$dahdi_kmod_pres -eq 0 ]]; then"
-        # Если отсутствует только dahdi — обновляем только его
-        echo "            logger \"Upgrading dahdi-linux-kmod-\$kernel\""
-        echo "            echo \"Please wait for approx 2 min once apt command execution is completed as dahdi-linux-kmod-\$kernel update in progress\""
-        echo "            apt -y upgrade dahdi-linux-kmod-\$kernel > /dev/null 2>&1 | at now +1 minute&"
-        echo "        elif [[ \$wanpipe_kmod_pres -eq 0 ]];then"
-        # Если отсутствует только wanpipe — обновляем только его
-        echo "            logger \"Upgrading kmod-wanpipe-\$kernel\""
-        echo "            echo \"Please wait for approx 2 min once apt command execution is completed as kmod-wanpipe-\$kernel update in progress\""
-        echo "            apt -y upgrade kmod-wanpipe-\$kernel > /dev/null 2>&1 | at now +1 minute&"
-        echo "        fi"
-        echo ""
-        echo "        break"
-        echo "    done"
-        echo "else"
-        # Если dahdi/wanpipe не установлены вообще — ничего не делаем
-        echo "    logger \"Dahdi / wanpipe is not present therefore, not checking for dahdi / wanpipe kmod upgrade\""
-        echo "fi"
-        echo ""
-        # Удаляем дефолтный index.html веб‑сервера (если есть), чтобы не мешал работе FreePBX
-        echo "if [ -e \"/var/www/html/index.html\" ]; then"
-        echo "    rm -f /var/www/html/index.html"
-        echo "fi"
-    } >> /usr/bin/post-apt-run
-
-    # Устанавливаем права на выполнение скрипта (rwxr‑xr‑x)
-    chmod 755 /usr/bin/post-apt-run
-
-    # Добавляем хук в APT: запускать /usr/bin/post-apt-run после каждого обновления пакетов
-    if [ -e "/etc/apt/apt.conf.d/80postaptcmd" ]; then
-        rm -f /etc/apt/apt.conf.d/80postaptcmd
-    fi
-
-    echo "DPkg::Post-Invoke {\"/usr/bin/post-apt-run\";};" >> /etc/apt/apt.conf.d/80postaptcmd
-    chmod 644 /etc/apt/apt.conf.d/80postaptcmd
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки совместимости версии ядра с модулями dahdi/wanpipe
-# -----------------------------------------------------------------------------------
-check_kernel_compatibility() {
-    # Определяем последнюю поддерживаемую версию модуля dahdi-linux-kmod из репозитория
-    local latest_dahdi_supported_version=$(apt-cache search dahdi | grep -E "^dahdi-linux-kmod-[0-9]" | awk '{print $1}' | awk -F'-' '{print $4"-"$5}' | sort -n | tail -1)
-    # Определяем последнюю поддерживаемую версию модуля kmod-wanpipe из репозитория
-    local latest_wanpipe_supported_version=$(apt-cache search wanpipe | grep -E "^kmod-wanpipe-[0-9]" | awk '{print $1}' | awk -F'-' '{print $3"-"$4}' | sort -n | tail -1)
-    # Переданная версия ядра для проверки
-    local curr_kernel_version=$1
-
-    # Если версии dahdi и wanpipe совпадают — принимаем эту версию как поддерживаемую,
-    # иначе используем жёстко заданную версию ядра (запасной вариант)
-    if dpkg --compare-versions "$latest_dahdi_supported_version" "eq" "$latest_wanpipe_supported_version"; then
-        local supported_kernel_version=$latest_dahdi_supported_version
-    else
-        local supported_kernel_version="6.1.0.22"
-    fi
-
-    # Если текущая версия ядра новее поддерживаемой — прерываем установку FreePBX,
-    # так как модули dahdi могут не работать
-    if dpkg --compare-versions "$curr_kernel_version" "gt" "$supported_kernel_version"; then
-        message "Aborting freepbx installation as detected kernel version $curr_kernel_version is not supported by freepbx dahdi module $supported_kernel_version"
-	exit
-    fi
-
-    # Удаляем старый скрипт проверки ядра, если он есть
-    if [ -e "/usr/bin/kernel-check" ]; then
-        rm -f /usr/bin/kernel-check
-    fi
-
-    # В тестовом режиме проверку ядра можно пропустить
-    if [ "$testrepo" ]; then
-        message "Skipping Kernel Check. As Kernel Check is not required for testing repo....."
-        return
-    fi
-
-    message "Creating kernel check script to allow proper kernel upgrades"
-    {
-        echo "#!/bin/bash"
-        echo ""
-        echo "curr_kernel_version=\"\""
-        echo "supported_kernel_version=\"\""
-        echo ""
-
-        # Функция определения поддерживаемой версии ядра на основе пакетов dahdi и wanpipe
-        echo "set_supported_kernel_version() {"
-        echo "    local latest_dahdi_supported_version=\$(apt-cache search dahdi | grep -E \"^dahdi-linux-kmod-[0-9]\" | awk '{print \$1}' | awk -F'-' '{print \$4,-\$5}' | sed 's/[[:space:]]//g' | sort -n | tail -1)"
-        echo "    local latest_wanpipe_supported_version=\$(apt-cache search wanpipe | grep -E \"^kmod-wanpipe-[0-9]\" | awk '{print \$1}' | awk -F'-' '{print \$3,-\$4}' | sed 's/[[:space:]]//g' | sort -n | tail -1)"
-        echo "    curr_kernel_version=\$(uname -r | cut -d'-' -f1-2)"
-        echo ""
-        echo "    if dpkg --compare-versions \"\$latest_dahdi_supported_version\" \"eq\" \"\$latest_wanpipe_supported_version\"; then"
-        echo "        supported_kernel_version=\$latest_dahdi_supported_version"
-        echo "    else"
-        echo "        supported_kernel_version=\"6.1.0-21\""
-        echo "    fi"
-        echo "}"
-        echo ""
-
-        # Функция разблокировки (unhold) пакетов ядра, если их версия не превышает поддерживаемую
-        echo "check_and_unblock_kernel() {"
-        echo "    local kernel_packages=\$(apt-mark showhold | grep -E ^linux-image-[0-9] | awk '{print \$1}')"
-        echo ""
-        echo "    if [[ \"w\$1\" != \"w\" ]]; then"
-        echo "        # Сравниваем переданную версию с поддерживаемой"
-        echo "        if dpkg --compare-versions \"\$1\" \"le\" \"\$supported_kernel_version\"; then"
-        echo "            local is_on_hold=\$(apt-mark showhold | grep -E ^linux-image-[0-9] | awk '{print \$1}' | grep -w \"\$1\" | wc -l )"
-        echo ""
-        echo "            if [[ \$is_on_hold -gt 0 ]]; then"
-        echo "                logger \"Un-Holding kernel version \$version to allow automatic updates.\""
-        echo "                apt-mark unhold \"\$version\" >> /dev/null 2>&1"
-        echo "            fi"
-        echo "        fi"
-        echo "        return"
-        echo "    fi"
-        echo ""
-        # Проходим по всем удерживаемым пакетам ядра и снимаем hold, если версия допустима
-        echo "    for package in \$kernel_packages; do"
-        echo "        # Извлекаем версию ядра из имени пакета (например, linux-image-6.1.0-21-amd64 → 6.1.0-21)"
-        echo "        local version=\$(echo \"\$package\" | awk -F'-' '{print \$3,-\$4}' | sed 's/[[:space:]]//g' | sort -n)"
-        echo ""
-        echo "        if dpkg --compare-versions \"\$version\" \"le\" \"\$supported_kernel_version\"; then"
-        echo "            logger \"Un-Holding kernel version \$version to allow automatic updates.\""
-        echo "            apt-mark unhold \"\$version\" >> /dev/null 2>&1"
-        echo "        fi"
-        echo "    done"
-        echo "}"
-
-        echo ""
-        # Функция блокировки (hold) пакетов ядра, версии которых превышают поддерживаемую
-        echo "check_and_block_kernel() {"
-        echo "    if dpkg --compare-versions \"\$curr_kernel_version\" \"gt\" \"\$supported_kernel_version\"; then"
-        echo "        logger \"Aborting as detected kernel version is not supported by freepbx dahdi module\""
-        echo "    fi"
-        echo ""
-
-        echo "    local kernel_packages=\$( apt-cache search linux-image | grep -E \"^linux-image-[0-9]\" | awk '{print \$1}')"
-        echo "    for package in \$kernel_packages; do"
-        echo "        local version=\$(echo \"\$package\" | awk -F'-' '{print \$3,-\$4}' | sed 's/[[:space:]]//g' | sort -n)"
-        echo ""
-
-        echo "        if dpkg --compare-versions \"\$version\" \"gt\" \"\$supported_kernel_version\"; then"
-        echo "            logger \"Holding kernel version \$version to prevent automatic updates.\""
-        echo "            apt-mark hold \"\$version\" >> /dev/null 2>&1"
-        echo "        else"
-        echo "            check_and_unblock_kernel \$version"
-        echo "        fi"
-        echo "    done"
-        echo "}"
-
-        echo ""
-        # Обработка аргументов командной строки для скрипта kernel-check
-        echo "case \$1 in"
-        echo "    --hold)"
-        echo "        hold=true"
-        echo "        ;;"
-        echo ""
-        echo "    --unhold)"
-        echo "        unhold=true"
-        echo "        ;;"
-        echo ""
-        echo "    *)"
-        echo "        logger \"Unknown / Invalid option \$1\""
-        echo "        exit 1"
-        echo "        ;;"
-        echo "esac"
-        echo ""
-        echo "set_supported_kernel_version"
-        echo ""
-        echo "if [[ \$hold ]]; then"
-        echo "    check_and_block_kernel"
-        echo "elif [[ \$unhold ]]; then"
-        echo "    check_and_unblock_kernel"
-        echo "fi"
-    } >> /usr/bin/kernel-check
-
-    # Устанавливаем права на выполнение для скрипта проверки ядра
-    chmod 755 /usr/bin/kernel-check
-
-# -----------------------------------------------------------------------------------
-# Добавляем хук в APT: запускать скрипт kernel-check с флагом --hold после каждого обновления пакетов.
-# Это нужно, чтобы автоматически блокировать неподдерживаемые версии ядра и не допустить поломки FreePBX
-# -----------------------------------------------------------------------------------
-if [ -e "/etc/apt/apt.conf.d/05checkkernel" ]; then
-    rm -f /etc/apt/apt.conf.d/05checkkernel
-fi
-echo "APT::Update::Post-Invoke {\"/usr/bin/kernel-check --hold\"}" >> /etc/apt/apt.conf.d/05checkkernel
-chmod 644 /etc/apt/apt.conf.d/05checkkernel
-}
-
-# -----------------------------------------------------------------------------------
-# Функция обновления подписей модулей FreePBX через fwconsole
-# -----------------------------------------------------------------------------------
-refresh_signatures() {
-  fwconsole ma refreshsignatures >> "$log"
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки статуса важных системных служб (fail2ban, iptables, apache2)
-# -----------------------------------------------------------------------------------
-check_services() {
-    # Список служб, которые нужно проверить
-    services=("fail2ban" "iptables")
-    for service in "${services[@]}"; do
-        # Получаем статус службы через systemctl
-        service_status=$(systemctl is-active "$service")
-        # Если служба не активна — выводим предупреждение
-        if [[ "$service_status" != "active" ]]; then
-            message "Service $service is not active. Please ensure it is running."
-        fi
-    done
-
-    # Проверяем статус Apache2
-    apache2_status=$(systemctl is-active apache2)
-    if [[ "$apache2_status" == "active" ]]; then
-        # Проверяем, действительно ли Apache2 слушает порт 80
-        apache_process=$(netstat -anp | awk '$4 ~ /:80$/ {sub(/.*\//,"",$7); print $7}')
-        if [ "$apache_process" == "apache2" ]; then
-            message "Apache2 service is running on port 80."
-        else
-            message "Apache2 is not running in port 80."
-        fi
-    else
-        message "The Apache2 service is not active. Please activate the service"
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки версии PHP на соответствие требованиям FreePBX (должна быть 8.2.x)
-# -----------------------------------------------------------------------------------
-check_php_version() {
-    # Получаем версию PHP из вывода команды php -v
-    php_version=$(php -v | grep built: | awk '{print $2}')
-    # Сравниваем первые 3 символа версии с «8.2»
-    if [[ "${php_version:0:3}" == "8.2" ]]; then
-        message "Installed PHP version $php_version is compatible with FreePBX."
-    else
-        message "Installed PHP version  $php_version is not compatible with FreePBX. Please install PHP version '8.2.x'"
-    fi
-
-    # Проверяем версию PHP‑модуля, загруженного в Apache (должен быть php8.2)
-    php_module_version=$(a2query -m | grep php | awk '{print $1}')
-
-    if [[ "$php_module_version" == "php8.2" ]]; then
-       log "The PHP module version $php_module_version is compatible with FreePBX. Proceeding with the script."
-    else
-       log "The installed PHP module version $php_module_version is not compatible with FreePBX. Please install PHP version '8.2'."
-       exit 1
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки статуса модулей FreePBX: все ли модули включены
-# -----------------------------------------------------------------------------------
-verify_module_status() {
-    # Получаем список модулей, исключая строки-заголовки и служебные строки
-    modules_list=$(fwconsole ma list | grep -Ewv "Enabled|----|Module|No repos")
-    if [ -z "$modules_list" ]; then
-        message "All Modules are Enabled."
-    else
-        message "List of modules which are not Enabled:"
-        message "$modules_list"
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки назначенных портов для сервисов FreePBX
-# сравнивает ожидаемые порты с реально назначенными в конфигурации
-# -----------------------------------------------------------------------------------
-inspect_network_ports() {
-    # Массив пар «порт — сервис»: чётные элементы — порты, нечётные — названия сервисов
-    local ports_services=(
-        82 restapps
-        83 restapi
-        81 ucp
-        80 acp
-        84 hpro
-        "" leport
-        "" sslrestapps
-        "" sslrestapi
-        "" sslucp
-        "" sslacp
-        "" sslhpro
-        "" sslsngphone
-    )
-
-    # Проходим по массиву с шагом 2: берём порт и соответствующий сервис
-    for (( i=0; i<${#ports_services[@]}; i+=2 )); do
-        port="${ports_services[i]}"
-        service="${ports_services[i+1]}"
-        # Получаем реально назначенный порт для сервиса через fwconsole sa ports
-        port_set=$(fwconsole sa ports | grep "$service" | cut -d'|' -f 2 | tr -d '[:space:]')
-
-        # Сравниваем ожидаемый и реальный порт
-        if [ "$port_set" == "$port" ]; then
-            message "$service module is assigned to its default port."
-        else
-            message "$service module is expected to have port $port assigned instead of $port_set"
-        fi
-    done
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки состояния процессов, запущенных через PM2 (есть ли оффлайн‑процессы)
-# -----------------------------------------------------------------------------------
-inspect_running_processes() {
-    processes=$(fwconsole pm2 --list |  grep -Ewv "online|----|Process")
-    if [ -z "$processes" ]; then
-        message "No Offline Processes found."
-    else
-        message "List of Offline processes:"
-        message "$processes"
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Основная функция проверки состояния FreePBX и связанных компонентов
-# -----------------------------------------------------------------------------------
-check_freepbx() {
-     # Проверяем, установлен ли пакет freepbx
-    if ! dpkg -l | grep -q 'freepbx'; then
-        message "FreePBX is not installed. Please install FreePBX to proceed."
-    else
-        # Если установлен — проверяем статус модулей
-        verify_module_status
-	# Если не включён режим «только открытый исходный код», проверяем порты
-	if [ ! "$opensourceonly" ] ; then
-        	inspect_network_ports
-	fi
-        # Проверяем состояние процессов PM2
-        inspect_running_processes
-        # Выводим список заданий FreePBX
-        inspect_job_status=$(fwconsole job --list)
-        message "Job list : $inspect_job_status"
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки версии модуля Digium Phones (требуется версия 21.0_3.6.8 или выше)
-# -----------------------------------------------------------------------------------
-check_digium_phones_version() {
-    installed_version=$(asterisk -rx 'digium_phones show version' | awk '/Version/{print $NF}' 2>/dev/null)
-    if [[ -n "$installed_version" ]]; then
-        required_version="21.0_3.6.8"
-        # Заменяем подчёркивания на точки для корректного сравнения версий
-        present_version=$(echo "$installed_version" | sed 's/_/./g')
-        required_version=$(echo "$required_version" | sed 's/_/./g')
-        # Сравниваем версии: если текущая меньше требуемой — сообщаем, что доступна более новая версия
-        if dpkg --compare-versions "$present_version" "lt" "$required_version"; then
-            message "A newer version of Digium Phones module is available."
-        else
-            message "Installed Digium Phones module version: ($installed_version)"
-        fi
-    else
-        message "Failed to check Digium Phones module version."
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция проверки установки и версии Asterisk, а также загрузки модуля res_digium_phone.so
-# -----------------------------------------------------------------------------------
-check_asterisk() {
-    if ! dpkg -l | grep -q 'asterisk'; then
-        message "Asterisk is not installed. Please install Asterisk to proceed."
-    else
-        # Выводим версию Asterisk
-        check_asterisk_version=$(asterisk -V)
-        message "$check_asterisk_version"
-	# Проверяем, загружен ли модуль res_digium_phone.so (модуль Digium Phones)
-	if asterisk -rx "module show" | grep -q "res_digium_phone.so"; then
-            check_digium_phones_version
-        else
-            message "Digium Phones module is not loaded. Please make sure it is installed and loaded correctly."
-        fi
-    fi
-}
-
-# -----------------------------------------------------------------------------------
-# Функция блокировки (hold) определённых пакетов, чтобы APT не обновлял их автоматически
-# -----------------------------------------------------------------------------------
-hold_packages() {
-    # Список пакетов, которые нужно заблокировать
-    local packages=("sangoma-pbx17" "nodejs" "node-*")
-    # Если не установлен флаг nofpbx, добавляем freepbx17 в список блокируемых пакетов
-    if [ ! "$nofpbx" ] ; then
-        packages+=("freepbx17")
-    fi
-
-    # Проходим по каждому пакету и ставим его на hold
-    for pkg in "${packages[@]}"; do
-        apt-mark hold "$pkg" >> "$log"
-    done
-}
-
-#####################################################################################
-#     Начало установки
-#####################################################################################
-
-# -----------------------------------------------------------------------------------
-# Переменные
-# -----------------------------------------------------------------------------------
-MIRROR_PRIO=600                           # Приоритет зеркала (используется в логике скрипта)
-host=$(hostname)                          # Получаем имя хоста системы
-kernel=$(uname -a)                        # Получаем полную строку информации о ядре системы
-fqdn="$(hostname -f)" || true             # Получаем полное доменное имя (FQDN). 
-                                          # Если команда не сработает — переменная останется пустой (|| true защищает от ошибки)
-
-# -----------------------------------------------------------------------------------
-# Устанавливаем утилиту wget, которая нужна для проверки версии скриптов/компонентов
-# -----------------------------------------------------------------------------------
-pkg_install wget
-
-# -----------------------------------------------------------------------------------
-# Проверка необходимости проверки версии скрипта
-# -----------------------------------------------------------------------------------
-if [[ $skipversion ]]; then
-    message "Skipping version check..."
-else
-    # Если флаг --skipversion не передан, выполняем проверку версии
-    message "Performing version check..."
-    check_version
-fi
-
-# -----------------------------------------------------------------------------------
-# Проверяем, запущен ли скрипт внутри контейнера (например, Docker/LXC)
-# -----------------------------------------------------------------------------------
-if systemd-detect-virt --container &> /dev/null; then
-	message "Running in a Container. Skipping Chrony installation."
-	# Устанавливаем флаг, чтобы позже не пытаться ставить chrony
-	nochrony=true
-fi
-
-# -----------------------------------------------------------------------------------
-# Определяем архитектуру системы через dpkg
-# -----------------------------------------------------------------------------------
-ARCH=$(dpkg --print-architecture)
-# FreePBX 17 можно устанавливать только на 64‑битные системы (amd64)
-if [ "$ARCH" != "amd64" ]; then
-    message "FreePBX 17 installation can only be made on a 64-bit (amd64) system!"
-    message "Current System's Architecture: $ARCH"
-    exit 1
-fi
-
-# -----------------------------------------------------------------------------------
-# Проверяем, корректно ли задано полное доменное имя (FQDN)
-# -----------------------------------------------------------------------------------
-if [ -z "$fqdn" ]; then
-    echo "Fully qualified domain name (FQDN) is not set correctly."
-    echo "Please set the FQDN for this system and re-run the script."
-    echo "To set the FQDN, update the /etc/hostname and /etc/hosts files."
-    exit 1
-fi
-
-# -----------------------------------------------------------------------------------
-# Гарантируем, что скрипт не запущен повторно: проверяем наличие PID‑файла
-# -----------------------------------------------------------------------------------
-pidfile='/var/run/freepbx17_installer.pid'
-
-if [ -f "$pidfile" ]; then
-	old_pid=$(cat "$pidfile")
-	# Проверяем, существует ли процесс с этим PID
-	if ps -p "$old_pid" > /dev/null; then
-		message "FreePBX 17 installation process is already going on (PID=$old_pid), hence not starting new process"
-		exit 1
-	else
-		# Если процесс уже завершился, а файл остался (зависший PID‑файл) — удаляем его
-		log "Removing stale PID file"
-		rm -f "${pidfile}"
-	fi
-fi
-# Записываем текущий PID процесса в PID‑файл
-echo "$$" > "$pidfile"
-
-# -----------------------------------------------------------------------------------
-# Шаг 1 - начало установки. 
-# Устанавливаем шаг для вывода в лог и прогресс‑бар.
-# Настраиваем обработку ошибок
-# -----------------------------------------------------------------------------------
-setCurrentStep "Starting installation."
-
-# Настраиваем обработку ошибок: при любой ошибке вызываем errorHandler с номером строки, кодом ошибки и командой
-trap 'errorHandler "$LINENO" "$?" "$BASH_COMMAND"' ERR
-# При выходе из скрипта (нормально или с ошибкой) вызываем terminate для корректной очистки
-trap "terminate" EXIT
-
-# -----------------------------------------------------------------------------------
-# Фиксируем время начала установки
-# -----------------------------------------------------------------------------------
-start=$(date +%s)
-message "  Starting FreePBX 17 installation process for $host $kernel"
-message "  Please refer to the $log to know the process..."
-log "  Executing script v$SCRIPTVER ..."
-
-# -----------------------------------------------------------------------------------
-# Шаг 2 - Проверка правильности установки (Зависимости и репозитории). 
-# -----------------------------------------------------------------------------------
-setCurrentStep "Making sure installation is sane"
-
-# Исправляем возможные проблемы с зависимостями в системе
-apt-get -y --fix-broken install >> "$log"
-# Удаляем неиспользуемые зависимости
-apt-get autoremove -y >> "$log"
-
-# Проверяем, есть ли в sources.list строка с CD‑ROM репозиторием
-if grep -q "^deb cdrom" /etc/apt/sources.list; then
-  # Если есть — комментируем эту строку, чтобы APT не пытался читать с CD
-  sed -i '/^deb cdrom/s/^/#/' /etc/apt/sources.list
-  message "Commented out CD-ROM repository in sources.list"
-fi
-
-# Обновляем списки пакетов из репозиториев
-apt-get update >> "$log"
-
-# -----------------------------------------------------------------------------------
-# Шаг 3 - Настройка конфигурации по-умолчанию (Iptables, Postfix, Gnupg)
-# Устанавливаем значения по-умолчанию для интерактивных вопросов пакетов,
-# чтобы установка шла в автоматическом режиме без запросов пользователю
-# -----------------------------------------------------------------------------------
-setCurrentStep "Setting up default configuration"
-
-debconf-set-selections <<EOF
-iptables-persistent iptables-persistent/autosave_v4 boolean true
-iptables-persistent iptables-persistent/autosave_v6 boolean true
-EOF
-
-# Указываем mailname для postfix как FQDN системы
-echo "postfix postfix/mailname string ${fqdn}" | debconf-set-selections
-# Указываем тип почтовой конфигурации как «Internet Site»
-echo "postfix postfix/main_mailer_type string 'Internet Site'" | debconf-set-selections
-
-# Устанавливаем gnupg — нужен для работы с GPG‑ключами репозиториев
-pkg_install gnupg
-
-# -----------------------------------------------------------------------------------
-# Шаг 4 - Настройка репозиториев.
-# Настраиваем репозитории для установки FreePBX и зависимостей
-# -----------------------------------------------------------------------------------
-setCurrentStep "Setting up repositories"
-
-setup_repositories
-
-# Определяем последнюю поддерживаемую версию ядра для DAHDI из доступных пакетов в репозитории
-lat_dahdi_supp_ver=$(apt-cache search dahdi | grep -E "^dahdi-linux-kmod-[0-9]" | awk '{print $1}' | awk -F'-' '{print $4"-"$5}' | sort -n | tail -1)
-# Получаем текущую версию ядра системы (только основную часть, без суффикса сборки)
-kernel_version=$(uname -r | cut -d'-' -f1-2)
-
-message " You are installing FreePBX 17 on kernel $kernel_version."
-message " Please note that if you have plan to use DAHDI then:"
-message " Ensure that you either choose DAHDI option so script will configure DAHDI"
-message "                                  OR"
-message " Ensure you are running a DAHDI supported Kernel. Current latest supported kernel version is $lat_dahdi_supp_ver."
-
-# Если пользователь явно выбрал установку DAHDI — проверяем совместимость ядра
-if [ "$dahdi" ]; then
-    setCurrentStep "Making sure we allow only proper kernel upgrade and version installation"
-    check_kernel_compatibility "$kernel_version"
-fi
-
-# Ещё раз обновляем списки пакетов после добавления новых репозиториев
-setCurrentStep "Updating repository"
-apt-get update >> "$log"
-
-# Сохраняем вывод apt-cache policy в лог — это полезно для диагностики проблем с репозиториями
-apt-cache policy  >> "$log"
-
-# Блокируем автоматический запуск служб tftp и chrony, потому что сначала нужно настроить их конфиги
-systemctl mask tftpd-hpa.service
-if [ "$nochrony" != true ]; then
-	systemctl mask chrony.service
-fi
-
-# -----------------------------------------------------------------------------------
-# Шаг 5 - Установка необходимых зависимых пакетов для FreePBX 17
-# -----------------------------------------------------------------------------------
-setCurrentStep "Installing required packages"
-
-# -----------------------------------------------------------------------------------
-# Список пакетов для продуктовой (production) установки — базовые и прикладные компоненты
-# -----------------------------------------------------------------------------------
-DEPPRODPKGS=(
-	"redis-server"                  # Redis — база данных для кэширования и очередей
-	"ghostscript"                   # Ghostscript — для работы с PDF и печатью
-	"libtiff-tools"                 # Утилиты для работы с TIFF‑изображениями
-	"iptables-persistent"           # Сохранение правил iptables после перезагрузки
-	"net-tools"                     # Классические сетевые утилиты (ifconfig, netstat и др.)
-	"rsyslog"                       # Системный логгер (сбор и маршрутизация логов)
-	"libavahi-client3"              # Клиент Avahi для обнаружения сервисов в локальной сети (mDNS)
-	"nmap"                          # Сканер сети (диагностика и аудит)
-	"apache2"                       # Веб‑сервер для FreePBX и модулей
-	"zip"                           # Утилита для работы с ZIP‑архивами
-	"incron"                        # Аналог cron, но реагирует на события файловой системы
-	"wget"                          # Утилита для скачивания файлов по HTTP/FTP
-	"vim"                           # Текстовый редактор
-	"openssh-server"                # SSH‑сервер для удалённого доступа
-	"rsync"                         # Утилита синхронизации файлов
-	"mariadb-server"                # СУБД MariaDB (база данных FreePBX)
-	"mariadb-client"                # Клиент для работы с MariaDB
-	"bison"                         # Генератор парсеров (нужен для сборки некоторых модулей)
-	"flex"                          # Генератор лексических анализаторов
-	"flite"                         # Синтезатор речи (TTS)
-	"php${PHPVERSION}"              # Основной PHP нужной версии
-	"php${PHPVERSION}-curl"         # PHP‑модуль для работы с HTTP‑запросами
-	"php${PHPVERSION}-zip"          # PHP‑модуль для ZIP
-	"php${PHPVERSION}-redis"       # PHP‑модуль для Redis
-	"php${PHPVERSION}-cli"          # CLI‑версия PHP
-	"php${PHPVERSION}-common"       # Общие файлы PHP
-	"php${PHPVERSION}-mysql"        # PHP‑модуль для MySQL/MariaDB
-	"php${PHPVERSION}-gd"           # PHP‑модуль для работы с графикой
-	"php${PHPVERSION}-mbstring"     # PHP‑модуль для работы с многобайтовыми строками
-	"php${PHPVERSION}-intl"         # PHP‑модуль для интернационализации
-	"php${PHPVERSION}-xml"          # PHP‑модуль для XML
-	"php${PHPVERSION}-bz2"          # PHP‑модуль для BZip2
-	"php${PHPVERSION}-ldap"         # PHP‑модуль для LDAP
-	"php${PHPVERSION}-sqlite3"      # PHP‑модуль для SQLite
-	"php${PHPVERSION}-bcmath"       # PHP‑модуль для произвольной точности вычислений
-	"php${PHPVERSION}-soap"         # PHP‑модуль для SOAP
-	"php${PHPVERSION}-ssh2"         # PHP‑модуль для SSH2
-	"php-pear"                      # PEAR — менеджер пакетов для PHP
-	"curl"                          # CLI‑утилита для HTTP‑запросов
-	"sox"                           # Утилита для обработки аудио
-	"mpg123"                        # Плеер/конвертер MP3
-	"sqlite3"                       # CLI‑интерфейс к SQLite
-	"git"                           # Система контроля версий
-	"uuid"                          # Утилиты для генерации UUID
-	"odbc-mariadb"                  # ODBC‑драйвер для MariaDB
-	"sudo"                          # Выполнение команд от имени root
-	"subversion"                    # Система контроля версий SVN
-	"unixodbc"                      # Базовая библиотека ODBC
-	"nodejs"                        # Среда выполнения Node.js
-	"npm"                           # Менеджер пакетов для Node.js
-	"ipset"                         # Работа с наборами IP‑адресов (для iptables)
-	"iptables"                      # Межсетевой экран
-	"fail2ban"                      # Защита от брутфорс‑атак
-	"htop"                          # Продвинутый просмотрщик процессов
-	"postfix"                       # Почтовый сервер
-	"tcpdump"                       # Сниффер сетевого трафика
-	"sngrep"                        # Утилита для анализа SIP‑трафика
-	"tftpd-hpa"                     # TFTP‑сервер (часто нужен для загрузки прошивок телефонов)
-	"xinetd"                        # Суперсервер для управления сетевыми демонами
-	"lame"                          # Кодировщик MP3
-	"haproxy"                       # Балансировщик нагрузки и прокси
-	"screen"                        # Мультиплексор терминала (для длительных сеансов)
-	"easy-rsa"                      # Утилиты для создания PKI (SSL‑сертификаты)
-	"openvpn"                       # VPN‑сервер/клиент
-	"sysstat"                       # Набор утилит для мониторинга системы (iostat, sar и т.д.)
-	"apt-transport-https"           # Поддержка HTTPS в APT
-	"lsb-release"                   # Утилита для определения версии дистрибутива
-	"ca-certificates"                # Корневые сертификаты для HTTPS
- 	"cron"                          # Планировщик задач
- 	"python3-mysqldb"               # Python‑модуль для доступа к MySQL
- 	"at"                            # Планировщик одноразовых задач
- 	"avahi-daemon"                  # Демон Avahi (обнаружение сервисов)
- 	"avahi-utils"                   # Утилиты Avahi
-	"libnss-mdns"                   # Поддержка разрешения имён через mDNS
-	"mailutils"                     # Утилиты для работы с почтой
-	# Asterisk package
-	"liburiparser1"                 # Библиотека для парсинга URI (нужна Asterisk)
-	# ffmpeg package
-	"libavdevice59"                 # Библиотека FFmpeg для захвата устройств
-	# System Admin module
-	"python3-mysqldb"               # Дублирование: Python‑модуль для MySQL (для модуля администрирования)
-	"python-is-python3"             # Симлинк python → python3 (для совместимости)
-	# User Control Panel module
-	"pkgconf"                       # Утилита pkg-config (поиск библиотек и их флагов)
-	"libicu-dev"                    # Библиотека ICU (Unicode и глобализация)
-	"libsrtp2-1"                    # Библиотека SRTP (шифрование RTP)
-	"libspandsp2"                   # Библиотека DSP‑функций (тональные сигналы, эхоподавление и т.п.)
-	"libncurses5"                    # Библиотека для текстовых интерфейсов
-	"autoconf"                      # Генератор скриптов конфигурации для сборки ПО
-	"libical3"                      # Библиотека для работы с календарём (iCalendar)
-	"libneon27"                     # Библиотека для WebDAV/HTTP
-	"libsnmp40"                     # Библиотека SNMP
-	"libtonezone"                   # Модуль генерации тональных сигналов (Asterisk)
-	"libbluetooth3"                 # Библиотека Bluetooth
-	"libunbound8"                   # Рекурсивный DNS‑резолвер Unbound
-	"libsybdb5"                     # Клиент Sybase
-	"libspeexdsp1"                  # Библиотека Speex DSP (кодек и обработка речи)
-	"libiksemel3"                   # Библиотека для XMPP
-	"libresample1"                   # Библиотека ресемплинга аудио
-	"libgmime-3.0-0"                # Библиотека для MIME‑сообщений
-	"libc-client2007e"              # Библиотека C‑Client (IMAP/POP3)
-	"imagemagick"                   # Утилиты для обработки изображений
+# ===================================================================================
+# СТРОГИЙ РЕЖИМ И КОНСТАНТЫ
+# ===================================================================================
+
+
+# Прерывать скрипт при любой ошибке, неинициализированной переменной
+# или сбое в конвейере (pipe)
+set -euo pipefail
+
+# --- Пороговые значения для проверки системы ---
+REQUIRED_DISK_KB=10485760       # Минимум 10 ГБ свободного места на /
+MIN_RAM_MB=900                  # Минимум 900 МБ RAM (иначе — ошибка)
+MIN_RAM_WARN_MB=1000            # Предупреждение, если RAM < 1 ГБ
+MIN_SWAP_MB=100                 # Минимум 100 МБ swap (если RAM мала)
+
+# --- Тайм-ауты и повторы (в секундах) ---
+APT_LOCK_TIMEOUT_S=300          # Ожидание снятия блокировки APT перед update
+APT_LOCK_INSTALL_TIMEOUT_S=120  # Ожидание снятия блокировки APT перед install
+MIRROR_MAX=3                    # Количество попыток проверки зеркал
+MIRROR_RETRY_DELAY_S=30        # Пауза между попытками проверки зеркал
+GUI_RETRY_MAX=3                 # Количество попыток проверки веб-интерфейса
+GUI_RETRY_DELAY_S=10            # Пауза между попытками проверки GUI
+RELOAD_RETRY_DELAY_S=15         # Пауза между попытками перезагрузки FreePBX
+
+# --- Прочее ---
+SLEEP_DELAY=0.5                 # Короткая пауза между шагами для читаемости вывода
+
+
+# ===================================================================================
+# ГЛОБАЛЬНЫЕ ФЛАГИ И ПЕРЕМЕННЫЕ
+# ===================================================================================
+
+
+# --- Режимы запуска ---
+SKIP_CHECKS=false               # --skip-checks: пропустить предустановочные проверки
+IS_NONINTERACTIVE=false         # Автоопределение: нет TTY → неинтерактивный режим
+IS_HEQET=false                  # Запуск с ISO-образа Heqet (особый путь очистки)
+RUN_FULL=false                  # --full: полная установка без меню
+MENU_MODE=false                 # --menu: интерактивное меню
+
+# --- Выбор зеркала FreePBX ---
+SELECTED_MIRROR=""              # URL APT-репозитория
+SELECTED_MIRROR_NAME=""         # Человекочитаемое имя зеркала
+SELECTED_MIRROR_GPG=""          # URL GPG-ключа зеркала
+
+# --- Доступные зеркала (имя | APT-URL | URL GPG-ключа) ---
+MIRRORS=(
+  "git.freepbx.asterisk.ru|http://git.freepbx.asterisk.ru/freepbx17-prod|http://git.freepbx.asterisk.ru/gpg/aptly-pubkey.asc"
+  "deb.freepbx.org (официальное)|http://deb.freepbx.org/freepbx-17-prod|http://deb.freepbx.org/freepbx-17-prod/pubkey.gpg"
 )
 
-# -----------------------------------------------------------------------------------
-# Список пакетов для разработки (dev) — заголовочные файлы и инструменты сборки
-# -----------------------------------------------------------------------------------
-DEPDEVPKGS=(
-	"libsnmp-dev"                   # Заголовочные файлы SNMP
-	"libtonezone-dev"               # Заголовочные файлы tonezone
-	"libpq-dev"                     # Заголовочные файлы PostgreSQL (если используется)
-	"liblua5.2-dev"                  # Заголовочные файлы Lua
-	"libpri-dev"                     # Заголовочные файлы PRI (ISDN)
-	"libbluetooth-dev"              # Заголовочные файлы Bluetooth
-	"libunbound-dev"                # Заголовочные файлы Unbound
-	"libspeexdsp-dev"               # Заголовочные файлы Speex DSP
-	"libiksemel-dev"                # Заголовочные файлы Iksemel (XMPP)
-	"libresample1-dev"              # Заголовочные файлы resample
-	"libgmime-3.0-dev"              # Заголовочные файлы GMime
-	"libc-client2007e-dev"          # Заголовочные файлы C‑Client
-	"libncurses-dev"                # Заголовочные файлы ncurses
-	"libssl-dev"                    # Заголовочные файлы OpenSSL
-	"libxml2-dev"                   # Заголовочные файлы XML2
-	"libnewt-dev"                   # Заголовочные файлы Newt (текстовые UI)
-	"libsqlite3-dev"                # Заголовочные файлы SQLite
-	"unixodbc-dev"                  # Заголовочные файлы ODBC
-	"uuid-dev"                      # Заголовочные файлы UUID
-	"libasound2-dev"                # Заголовочные файлы ALSA (звук)
-	"libogg-dev"                    # Заголовочные файлы Ogg
-	"libvorbis-dev"                 # Заголовочные файлы Vorbis
-	"libcurl4-openssl-dev"          # Заголовочные файлы cURL с OpenSSL
-	"libical-dev"                   # Заголовочные файлы iCalendar
-	"libneon27-dev"                 # Заголовочные файлы Neon (WebDAV/HTTP)
-	"libsrtp2-dev"                  # Заголовочные файлы SRTP
-	"libspandsp-dev"                # Заголовочные файлы SpanDSP
-	"libjansson-dev"                # Заголовочные файлы JSON (Jansson)
-	"liburiparser-dev"              # Заголовочные файлы uriparser
-	"libavdevice-dev"               # Заголовочные файлы FFmpeg (устройства)
-	"python-dev-is-python3"         # Заголовочные файлы Python (с симлинком на python3)
-	"default-libmysqlclient-dev"    # Заголовочные файлы MySQL‑клиента
-	"dpkg-dev"                      # Инструменты для сборки .deb‑пакетов
-	"build-essential"               # Базовый набор инструментов для компиляции (gcc, make и т.д.)
-	"automake"                      # Генератор Makefile
-	"autoconf"                      # Повторно: генератор скриптов конфигурации
-	"libtool-bin"                   # Утилиты libtool
-	"bison"                         # Повторно: генератор парсеров
-	"flex"                          # Повторно: генератор лексических анализаторов
-)
-
-# Если флаг $dev установлен — подключаем пакеты для разработки, иначе только продуктовые
-if [ $dev ]; then
-	DEPPKGS=("${DEPPRODPKGS[@]}" "${DEPDEVPKGS[@]}")
-else
-	DEPPKGS=("${DEPPRODPKGS[@]}")
+# --- Разбор аргументов командной строки ---
+if [[ "${1:-}" == "--skip-checks" ]]; then
+  SKIP_CHECKS=true
 fi
 
-# Если не работаем в контейнере (nochrony не установлен), добавляем chrony для синхронизации времени
-if [ "$nochrony" != true ]; then
-	DEPPKGS+=("chrony")
+if [[ "${1:-}" == "--menu" ]]; then
+  MENU_MODE=true
 fi
 
-# Последовательно устанавливаем все пакеты из массива DEPPKGS
-for i in "${!DEPPKGS[@]}"; do
-	pkg_install "${DEPPKGS[$i]}"
-done
+if [[ "${1:-}" == "--full" ]]; then
+  RUN_FULL=true
+fi
 
-# -----------------------------------------------------------------------------------
-# Настройка Postfix: 
-# ограничиваем прослушивание только localhost (127.0.0.1),
-# это снижает риск раскрытия почтового сервера в публичной сети
-# -----------------------------------------------------------------------------------
-if  dpkg -l | grep -q 'postfix'; then
-    warning_message="# WARNING: Changing the inet_interfaces to an IP other than 127.0.0.1 may expose Postfix to external network connections.\n# Only modify this setting if you understand the implications and have specific network requirements."
+# Если stdin не привязан к терминалу — считаем запуск неинтерактивным
+# (например, через pipe: curl ... | sh)
+if [ ! -t 0 ]; then
+  IS_NONINTERACTIVE=true
+fi
 
-    # Если предупреждение ещё не добавлено в main.cf — добавляем его перед строкой inet_interfaces
-    if ! grep -q "WARNING: Changing the inet_interfaces" /etc/postfix/main.cf; then
-        sed -i "/^inet_interfaces\s*=/i $warning_message" /etc/postfix/main.cf
+# Запоминаем время старта для отчёта о длительности установки
+START_TIME=$(date +%s)
+
+
+# ===================================================================================
+# ЦВЕТА ВЫВОДА (ANSI escape-коды)
+# Используются только для терминального вывода; в лог-файлы попадают
+# как литералы, что нормально для диагностики.
+# ===================================================================================
+
+
+BGRN='\033[1;32m'          # Жирный зелёный  — успех, готовность
+BRED='\033[1;31m'          # Жирный красный  — ошибки, прерывание
+CYAN='\033[38;5;51m'       # Циан            — информационные сообщения, прощание
+BYEL='\e[93m'              # Жирный жёлтый   — предупреждения, меню
+WHT='\033[1;37m'           # Жирный белый    — обычный текст, пояснения
+NC='\033[0m'               # Сброс           — возврат к стандартному цвету
+BMAG='\033[1;35m'          # Жирный пурпурный — заголовки блоков, рамки меню
+
+
+# ===================================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ===================================================================================
+
+
+# --- Таймер обратного отсчёта ---
+# Выводит секунды до следующей попытки, затирая строку каждую секунду.
+countdown() {
+  local secs=$1
+  local i=$secs
+  while [ "$i" -ge 1 ]; do
+    printf "\r  ${BYEL}Повтор через %2s...${NC}" "$i"
+    sleep 1
+    i=$((i - 1))
+  done
+  printf "\r                        \r"
+}
+
+# --- Вывод заголовка шага ---
+# Зелёная строка-разделитель перед каждым этапом установки.
+print_step() {
+  echo -e "\n${BGRN}$1${NC}\n"
+}
+
+# --- Обработчик сбоя установки FreePBX ---
+# Вызывается, если официальный установщик завершился с ошибкой.
+# Выводит диагностику и завершает скрипт.
+handle_install_failure() {
+  local line="────────────────────────────────────────────────────────"
+
+  echo
+  echo -e "${BRED}ВНИМАНИЕ: Установка FreePBX 17 завершилась с ошибкой.${NC}"
+  echo -e "${WHT}Это сбой официального установщика FreePBX.${NC}"
+  echo -e "$line"
+
+  echo -e "${WHT}Возможные причины:${NC}"
+  echo -e "  ${BYEL}• Пакет не установился — отсутствует зависимость или устаревший репозиторий${NC}"
+  echo -e "  ${BYEL}• Asterisk не запустился — сломанный модуль или неверная конфигурация${NC}"
+  echo -e "  ${BYEL}• GUI не работает — сбой Apache или неверная конфигурация PHP${NC}"
+  echo -e "$line"
+
+  echo -e "${WHT}Диагностика:${NC}"
+  printf "  ${BYEL}%-45s${WHT}%s${NC}\n" \
+    "Логи установки FreePBX:"        "cat /var/log/pbx/freepbx-*.log" \
+    "Статус Asterisk:"               "systemctl status asterisk" \
+    "Ошибки во время установки:"     "tail -n 100 /var/log/asterisk/full" \
+    "Перезапуск FreePBX:"            "fwconsole restart"
+
+  echo
+  echo -e "  ${BYEL}WinSCP: SCP → ваш IP → порт 22 → /var/log/pbx/freepbx-*.log${NC}"
+  echo
+  echo -e "$line"
+
+  echo -e "${BRED}Скрипт завершает работу.${CYAN} До свидания.${NC}"
+  exit 1
+}
+
+# --- Ожидание освобождения блокировок APT/dpkg ---
+# Если другой процесс пакетного менеджера держит lock-файлы,
+# ждёт до max_wait секунд, затем прерывает выполнение.
+wait_apt_lock() {
+  local max_wait="${1:-$APT_LOCK_TIMEOUT_S}"
+  local wait=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+        /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    if [ "$wait" -eq 0 ]; then
+      echo -e "${BYEL}Другой менеджер пакетов запущен. Ожидание завершения...${NC}"
     fi
-
-    # Принудительно устанавливаем inet_interfaces = 127.0.0.1
-    sed -i "s/^inet_interfaces\s*=.*/inet_interfaces = 127.0.0.1/" /etc/postfix/main.cf
-
-    # Перезапускаем Postfix, чтобы применить изменения
-    systemctl restart postfix
-fi
-
-# -----------------------------------------------------------------------------------
-# Подготовка директории для EasyRSA (PKI для OpenVPN)
-# -----------------------------------------------------------------------------------
-# Если папка /etc/openvpn/easyrsa3 ещё не создана — создаём её через утилиту make-cadir
-if [ ! -d "/etc/openvpn/easyrsa3" ]; then
-	make-cadir /etc/openvpn/easyrsa3
-fi
-
-# Удаляем файлы vars и /pki/vars — они будут заново сгенерированы модулем sysadmin позже
-rm -f /etc/openvpn/easyrsa3/pki/vars || true
-rm -f /etc/openvpn/easyrsa3/vars
-
-# -----------------------------------------------------------------------------------
-# Установка поддержки карт DAHDI, если при запуске скрипта была указана опция --dahdi
-# -----------------------------------------------------------------------------------
-if [ "$dahdi" ]; then
-    message "Installing DAHDI card support..."
-    # Список пакетов, необходимых для работы DAHDI и связанных технологий (PRI, Wanpipe)
-    DAHDIPKGS=("asterisk${ASTVERSION}-dahdi"
-           "dahdi-firmware"                # Прошивки для DAHDI‑карт
-           "dahdi-linux"                  # Ядро DAHDI (основные модули)
-           "dahdi-linux-devel"             # Заголовочные файлы для сборки модулей DAHDI
-           "dahdi-tools"                   # Утилиты для настройки и диагностики DAHDI
-           "libpri"                        # Библиотека для работы с PRI (ISDN)
-           "libpri-devel"                  # Заголовочные файлы libpri
-           "wanpipe"                       # Драйверы и утилиты для карт Sangoma (Wanpipe)
-           "wanpipe-devel"                 # Заголовочные файлы Wanpipe
-           "dahdi-linux-kmod-${kernel_version}"  # Модуль ядра DAHDI под текущую версию ядра
-           "kmod-wanpipe-${kernel_version}"      # Модуль ядра Wanpipe под текущую версию ядра
-	)
-
-        # Последовательно устанавливаем все пакеты из списка DAHDIPKGS
-        for i in "${!DAHDIPKGS[@]}"; do
-                pkg_install "${DAHDIPKGS[$i]}"
-        done
-fi
-
-# Установка кодека libfdk‑aac2 (высококачественный AAC)
-if [ "$noaac" ] ; then
-	# Если указана опция --noaac — пропускаем установку
-	message "Skipping libfdk-aac2 installation due to noaac option"
-else
-	# Иначе устанавливаем пакет
-	pkg_install libfdk-aac2
-fi
-
-# -----------------------------------------------------------------------------------
-# Шаг 6 - Удаляем ненужных пакетов, чтобы уменьшить размер системы и избежать конфликтов
-# -----------------------------------------------------------------------------------
-setCurrentStep "Removing unnecessary packages"
-apt-get autoremove -y >> "$log"
-
-# -----------------------------------------------------------------------------------
-# Вычисляем время выполнения этапа установки пакетов
-# -----------------------------------------------------------------------------------
-execution_time="$(($(date +%s) - start))"
-message "Execution time to install all the dependent packages : $execution_time s"
-
-# -----------------------------------------------------------------------------------
-# Шаг 7 - Подготовка директорий и настройка конфигурации Asterisk
-# -----------------------------------------------------------------------------------
-setCurrentStep "Setting up folders and asterisk config"
-
-# Проверяем, существует ли группа asterisk
-groupExists="$(getent group asterisk || echo '')"
-if [ "${groupExists}" = "" ]; then
-	# Если нет — создаём системную группу asterisk
-	groupadd -r asterisk
-fi
-
-# Проверяем, существует ли пользователь asterisk
-userExists="$(getent passwd asterisk || echo '')"
-if [ "${userExists}" = "" ]; then
-	# Если нет — создаём системного пользователя asterisk:
-	# - без домашнего каталога по умолчанию (-M), но с явно заданным /home/asterisk
-	# - с оболочкой /bin/bash
-	# - в группе asterisk
-	useradd -r -g asterisk -d /home/asterisk -M -s /bin/bash asterisk
-fi
-
-# Примечание: строка добавления asterisk в sudoers закомментирована — обычно не требуется
-# echo "%asterisk ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-
-# Создаём директорию /tftpboot — она нужна для загрузки прошивок телефонов по TFTP
-mkdir -p /tftpboot
-chown -R asterisk:asterisk /tftpboot
-
-# Меняем путь TFTP‑сервера на /tftpboot в конфигурации tftpd‑hpa
-sed -i -e "s|^TFTP_DIRECTORY=\"/srv\/tftp\"$|TFTP_DIRECTORY=\"/tftpboot\"|" /etc/default/tftpd-hpa
-
-# Если IPv6 недоступен (нет файла /proc/net/if_inet6), добавляем флаги для работы только по IPv4
-# Это предотвращает ошибки запуска сервисов в сетях без IPv6
-if [ ! -f /proc/net/if_inet6 ]; then
-	# Добавляем флаг --ipv4 для tftpd‑hpa
-	sed -i -e "s|^TFTP_OPTIONS=\"--secure\"$|TFTP_OPTIONS=\"--secure --ipv4\"|" /etc/default/tftpd-hpa
-	# Для chrony добавляем флаг -4 (только IPv4), если chrony не отключён
-	if [ "$nochrony" != true ]; then
-		sed -i -e "s|^DAEMON_OPTS=\"-F 1\"$|DAEMON_OPTS=\"-F 1 -4\"|" /etc/default/chrony
-	fi
-fi
-
-# Снимаем маску и запускаем службы tftp и chrony
-systemctl unmask tftpd-hpa.service
-systemctl start tftpd-hpa.service
-if [ "$nochrony" != true ]; then
-	systemctl unmask chrony.service
-	systemctl start chrony.service
-fi
-
-# Создаём директорию для звуковых файлов Asterisk
-mkdir -p /var/lib/asterisk/sounds
-chown -R asterisk:asterisk /var/lib/asterisk
-
-# Адаптируем конфигурацию OpenSSL для совместимости с Katana (модуль FreePBX)
-# Заменяем строку openssl_conf = openssl_init на openssl_conf = default_conf
-sed -i -e 's/^openssl_conf = openssl_init$/openssl_conf = default_conf/' /etc/ssl/openssl.cnf
-
-# Проверяем, уже ли добавлены настройки FreePBX 17 в openssl.cnf
-isSSLConfigAdapted=$(grep "FreePBX 17 changes" /etc/ssl/openssl.cnf |wc -l)
-if [ "0" = "${isSSLConfigAdapted}" ]; then
-	# Если нет — добавляем секцию с настройками TLS (минимальный протокол TLSv1.2 и безопасные шифры)
-	cat <<EOF >> /etc/ssl/openssl.cnf
-# FreePBX 17 changes - begin
-[ default_conf ]
-ssl_conf = ssl_sect
-[ssl_sect]
-system_default = system_default_sect
-[system_default_sect]
-MinProtocol = TLSv1.2
-CipherString = DEFAULT:@SECLEVEL=1
-# FreePBX 17 changes - end
-EOF
-fi
-
-# Повышаем приоритет IPv4 над IPv6 в разрешении имён (для стабильной работы сервисов)
-# Раскомментируем и устанавливаем правило precedence для IPv4‑mapped адресов
-sed -i 's/^#\s*precedence ::ffff:0:0\/96  100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf
-
-# Настройка screen: добавляем удобный статус‑бар с информацией о хосте, дате и времени
-isScreenRcAdapted=$(grep "FreePBX 17 changes" /root/.screenrc |wc -l)
-if [ "0" = "${isScreenRcAdapted}" ]; then
-	cat <<EOF >> /root/.screenrc
-# FreePBX 17 changes - begin
-hardstatus alwayslastline
-hardstatus string '%{= kG}[ %{G}%H %{g}][%= %{=kw}%?%-Lw%?%{r}(%{W}%n*%f%t%?(%u)%?%{r})%{w}%?%+Lw%?%?%= %{g}][%{B}%Y-%m-%d %{W}%c %{g}]'
-# FreePBX 17 changes - end
-EOF
-fi
-
-# -----------------------------------------------------------------------------------
-# Настройка Vim: включаем поддержку мыши для копирования/вставки (удобно при работе в терминале)
-# EOF - запись текста в конфигурационный файл
-# -----------------------------------------------------------------------------------
-isVimRcAdapted=$(grep "FreePBX 17 changes" /etc/vim/vimrc.local |wc -l)
-if [ "0" = "${isVimRcAdapted}" ]; then
-	cat <<EOF >> /etc/vim/vimrc.local
-" FreePBX 17 changes - begin
-" This file loads the default vim options at the beginning and prevents
-" that they are being loaded again later. All other options that will be set,
-" are added, or overwrite the default settings. Add as many options as you
-" whish at the end of this file.
-
-" Load the defaults
-source \$VIMRUNTIME/defaults.vim
-
-" Prevent the defaults from being loaded again later, if the user doesn't
-" have a local vimrc (~/.vimrc)
-let skip_defaults_vim = 1
-
-
-" Set more options (overwrites settings from /usr/share/vim/vim80/defaults.vim)
-" Add as many options as you whish
-
-" Set the mouse mode to 'r'
-if has('mouse')
-  set mouse=r
-endif
-" FreePBX 17 changes - end
-EOF
-fi
-
-# -----------------------------------------------------------------------------------
-# Настройка APT: запрещаем перезаписывать существующие конфигурационные файлы при установке/обновлении пакетов
-# Используем опции --force-confdef (использовать значение по умолчанию) и --force-confold (оставить старую версию конфига)
-# -----------------------------------------------------------------------------------
-aptNoOverwrite=$(grep "DPkg::options { \"--force-confdef\"; \"--force-confold\"; }" /etc/apt/apt.conf.d/00freepbx |wc -l)
-if [ "0" = "${aptNoOverwrite}" ]; then
-        cat <<EOF >> /etc/apt/apt.conf.d/00freepbx
-DPkg::options { "--force-confdef"; "--force-confold"; }
-EOF
-fi
-
-# -----------------------------------------------------------------------------------
-# ЗАКОММЕНТИРОВАННАЯ СТРОКА: 
-# изменение владельца директории /etc/ssl на пользователя asterisk
-# В текущей версии скрипта эта операция не выполняется
-# -----------------------------------------------------------------------------------
-# chown -R asterisk:asterisk /etc/ssl
-
-# -----------------------------------------------------------------------------------
-# Установка Asterisk
-# -----------------------------------------------------------------------------------
-if [ "$noast" ] ; then
-	# Если указана опция --noasterisk — пропускаем установку Asterisk
-	message "Skipping Asterisk installation due to noasterisk option"
-else
-	# TODO: требуется проверить, установлен ли уже Asterisk. Если да — удалить старую версию и установить новую.
-	# Устанавливаем пакеты Asterisk нужной версии
-	setCurrentStep "Installing Asterisk packages."
-	install_asterisk $ASTVERSION
-fi
-
-# -----------------------------------------------------------------------------------
-# Шаг 8 - Установка пакетов, необходимых для работы FreePBX
-# -----------------------------------------------------------------------------------
-setCurrentStep "Installing FreePBX packages"
-
-FPBXPKGS=("sysadmin17"          # Модуль администрирования FreePBX
-	   "sangoma-pbx17"          # Основной пакет PBX от Sangoma
-	   "ffmpeg"                 # Утилита для обработки аудио/видео (нужна для некоторых функций FreePBX)
-   )
-# Последовательно устанавливаем все пакеты из списка FPBXPKGS
-for i in "${!FPBXPKGS[@]}"; do
-	pkg_install "${FPBXPKGS[$i]}"
-done
-
-# -----------------------------------------------------------------------------------
-# Шаг 9 - Активация PHP‑модуля Freepbx (подключает конфигурацию FreePBX к PHP)
-# -----------------------------------------------------------------------------------
-setCurrentStep "Enabling modules."
-phpenmod freepbx
-# Создаём директорию для хранения сессий PHP (требуется для корректной работы веб‑интерфейса)
-mkdir -p /var/lib/php/session
-
-# -----------------------------------------------------------------------------------
-# Создание базовых конфигурационных файлов Asterisk
-# -----------------------------------------------------------------------------------
-mkdir -p /etc/asterisk
-# Создаём пустые файлы, которые будут заполняться или дополняться в процессе работы FreePBX
-touch /etc/asterisk/extconfig_custom.conf              # Пользовательские настройки extconfig
-touch /etc/asterisk/extensions_override_freepbx.conf    # Переопределения диалплана от FreePBX
-touch /etc/asterisk/extensions_additional.conf         # Дополнительные правила диалплана
-touch /etc/asterisk/extensions_custom.conf              # Пользовательский диалплан
-# Назначаем владельцем всех файлов и папок в /etc/asterisk пользователя и группу asterisk
-chown -R asterisk:asterisk /etc/asterisk
-
-# -----------------------------------------------------------------------------------
-# Шаг 10 - Перезапуск службы fail2ban для применения возможных новых правил
-# -----------------------------------------------------------------------------------
-setCurrentStep "Restarting fail2ban"
-systemctl restart fail2ban  >> "$log"
-
-# -----------------------------------------------------------------------------------
-# (Опция --nofreepbx). Если указана, то пропускаем установку FreePBX 17
-# -----------------------------------------------------------------------------------
-if [ "$nofpbx" ] ; then
-    message "Skipping FreePBX 17 installation due to nofreepbx option"
-else
-  # -----------------------------------------------------------------------------------
-  # Шаг 11 - Установка FreePBX
-  # -----------------------------------------------------------------------------------
-  setCurrentStep "Installing FreePBX 17"
-  # Устанавливаем ioncube‑loader для PHP 8.2 (требуется для работы проприетарных модулей FreePBX)
-  pkg_install ioncube-loader-82
-  # Устанавливаем основной пакет FreePBX 17
-  pkg_install freepbx17
-
-  # -----------------------------------------------------------------------------------
-  # (Опция --npmmirror). Если задан NPM_MIRROR — устанавливаем переменную окружения для npm
-  # Это полезно, если нужно использовать внутренний или ускоренный репозиторий npm
-  # -----------------------------------------------------------------------------------
-  if [ -n "$NPM_MIRROR" ] ; then
-    setCurrentStep "Setting environment variable npm_config_registry=$NPM_MIRROR"
-    export npm_config_registry="$NPM_MIRROR"
+    wait=$((wait + 1))
+    if [ "$wait" -ge "$max_wait" ]; then
+      echo -e "${BRED}Блокировка APT удерживается более $((max_wait / 60)) мин. Завершение работы.${NC}"
+      exit 1
+    fi
+    sleep 1
+  done
+  if [ "$wait" -gt 0 ]; then
+    echo -e "Блокировка снята через ${wait} секунд. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "Блокировки APT не обнаружены. ${WHT}Можно продолжать.${NC}"
   fi
+  sleep $SLEEP_DELAY
+}
 
-  # -----------------------------------------------------------------------------------
-  # (Опция --opensourceonly). Если требуется только открытый исходный код  — удаляем коммерческие модули
-  # -----------------------------------------------------------------------------------
-  if [ "$opensourceonly" ]; then
-    setCurrentStep "Removing commercial modules"
-    # Находим все модули с пометкой Commercial и удаляем их
-    fwconsole ma list | awk '/Commercial/ {print $2}' | xargs -t -I {} fwconsole ma -f remove {} >> "$log"
-    # Удаляем модуль firewall, так как он зависит от коммерческого модуля sysadmin
-    fwconsole ma -f remove firewall >> "$log" || true
-  fi
+# --- Проверка существующей установки ---
+# Универсальная функция: принимает имя компонента и команду проверки.
+# Если компонент уже установлен — прерывает выполнение.
+check_existing_install() {
+  local name="$1"
+  local check_cmd="$2"
 
-  # -----------------------------------------------------------------------------------
-  # (Опция --dahdi). Если включена поддержка DAHDI — устанавливаем модуль dahdiconfig 
-  # и настраиваем переменные окружения для Wanpipe
-  # -----------------------------------------------------------------------------------
-  if [ "$dahdi" ]; then
-    fwconsole ma downloadinstall dahdiconfig >> "$log"
-    # Добавляем путь к Perl‑библиотекам Wanpipe в переменную PERL5LIB
-    echo 'export PERL5LIB=$PERL5LIB:/etc/wanpipe/wancfg_zaptel' | sudo tee -a /root/.bashrc
-  fi
-
-  # -----------------------------------------------------------------------------------
-  # Шаг 12 - Устанавливаем все локально доступные модули FreePBX (из кэша или загруженных ранее)
-  # -----------------------------------------------------------------------------------
-  setCurrentStep "Installing all local modules"
-  fwconsole ma installlocal >> "$log"
-
-  # -----------------------------------------------------------------------------------
-  # Шаг 13 - Обновляем все модули FreePBX до последних версий
-  # -----------------------------------------------------------------------------------
-  setCurrentStep "Upgrading FreePBX 17 modules"
-  fwconsole ma upgradeall >> "$log"
-
-  # -----------------------------------------------------------------------------------
-  # Шаг 14 - Перезагружаем конфигурацию и перезапускаем сервисы FreePBX
-  # -----------------------------------------------------------------------------------
-  setCurrentStep "Reloading and restarting FreePBX 17"
-  fwconsole reload >> "$log"
-  fwconsole restart >> "$log"
-
-  # -----------------------------------------------------------------------------------
-  # Если выбран режим «только открытый исходный код (opensourceonly)» 
-  # то удаляем вспомогательные пакеты, нужные только для коммерческих модулей
-  # -----------------------------------------------------------------------------------
-  if [ "$opensourceonly" ]; then
-    message "Uninstalling sysadmin17"
-    apt-get purge -y sysadmin17 >> "$log"
-    message "Uninstalling ioncube-loader-82"
-    apt-get purge -y ioncube-loader-82 >> "$log"
-  fi
-fi
-
-# -----------------------------------------------------------------------------------
-# Шаг 15 - Завершение процесса установки: 
-# обновляем список юнитов systemd
-# -----------------------------------------------------------------------------------
-setCurrentStep "Wrapping up the installation process"
-systemctl daemon-reload >> "$log"
-# Включаем автозапуск FreePBX при загрузке системы (если не была указана опция --nofreepbx)
-if [ ! "$nofpbx" ] ; then
-  systemctl enable freepbx >> "$log"
-fi
-
-# -----------------------------------------------------------------------------------
-# Apache - удаляем index.html, включаем SSL, включаем модули, активируем сайты и т.д.
-# Дополнительные настройка HTTP
-# -----------------------------------------------------------------------------------
-# Удаляем стандартный файл index.html из веб‑директории Apache — он не нужен для FreePBX
-rm -f /var/www/html/index.html
-
-# Включаем модуль SSL в Apache (нужен для HTTPS)
-a2enmod ssl  >> "$log"
-
-# Включаем модуль expires в Apache (для кэширования статических файлов)
-a2enmod expires  >> "$log"
-
-# Включаем модуль rewrite в Apache (требуется для маршрутизации URL в FreePBX)
-a2enmod rewrite >> "$log"
-
-# Активируем конфигурационные файлы сайта FreePBX и SSL в Apache
-if [ ! "$nofpbx" ] ; then 
-  a2ensite freepbx.conf >> "$log"
-  a2ensite default-ssl >> "$log"
-fi
-
-# Устанавливаем максимальный размер почтового сообщения в Postfix равным 100 МБ (в байтах: 102400000)
-postconf -e message_size_limit=102400000
-
-# Отключаем вывод информации о версии PHP в HTTP‑заголовках (снижает риск раскрытия версии для злоумышленников)
-sed -i 's/$^expose_php = $.*/\1Off/' /etc/php/${PHPVERSION}/apache2/php.ini
-
-# Увеличиваем лимит переменных во входных данных (POST/GET) до 2000 (по умолчанию часто 1000, чего может не хватать для сложных форм FreePBX)
-sed -i 's/;max_input_vars = 1000/max_input_vars = 2000/' /etc/php/${PHPVERSION}/apache2/php.ini
-
-# Отключаем раскрытие информации о сервере в HTTP‑ответах (ServerTokens и ServerSignature) — это повышает безопасность
-sed -i 's/$^ServerTokens $.*/\1Prod/' /etc/apache2/conf-available/security.conf
-sed -i 's/$^ServerSignature $.*/\1Off/' /etc/apache2/conf-available/security.conf
-
-# Отключаем JIT‑компиляцию в PCRE (иногда требуется для стабильности или совместимости)
-sed -i 's/;pcre.jit=1/pcre.jit=0/' /etc/php/${PHPVERSION}/apache2/php.ini
-
-# Перезапускаем Apache, чтобы применить все изменения конфигурации
-systemctl restart apache2 >> "$log"
-
-# -----------------------------------------------------------------------------------
-# Шаг 16 - Блокируем обновление ключевых пакетов, чтобы избежать поломок системы при будущих обновлениях
-# -----------------------------------------------------------------------------------
-setCurrentStep "Holding Packages"
-hold_packages
-
-# Настраиваем logrotate: включаем добавление даты к именам файлов логов (dateext)
-# Это упрощает хранение и поиск старых логов
-if grep -q '^#dateext' /etc/logrotate.conf; then
-   message "Setting up logrotate.conf"
-   sed -i 's/^#dateext/dateext/' /etc/logrotate.conf
-fi
-
-# Настройка прав доступа: назначаем владельцем всех файлов и поддиректорий в /var/www/html пользователя и группу asterisk
-# Это необходимо для корректной работы веб‑интерфейса FreePBX
-chown -R asterisk:asterisk /var/www/html/
-
-# Создание скриптов, которые будут выполнены после завершения работы APT (например, для финальной настройки зависимостей)
-create_post_apt_script
-
-# -----------------------------------------------------------------------------------
-# Шаг 17 - Обновление подписей модулей FreePBX — это нужно для проверки целостности и подлинности модулей
-# -----------------------------------------------------------------------------------
-setCurrentStep "Refreshing modules signatures."
-count=1
-if [ ! "$nofpbx" ]; then
-  # Пытаемся обновить подписи модулей; если команда завершается с ошибкой — запускаем её в фоне и продолжаем выполнение скрипта
-  while [ $count -eq 1 ]; do
-    set +e                # Временно отключаем автоматическое завершение скрипта при ошибке команды
-    refresh_signatures
-    exit_status=$?        # Сохраняем код возврата последней команды
-    set -e                # Возвращаем строгий режим: при ошибке скрипт будет останавливаться (если не перехвачено явно)
-    if [ $exit_status -eq 0 ]; then
-      # Если обновление подписей прошло успешно — выходим из цикла
-      break
+  print_step "Проверка существующей установки $name..."
+  if eval "$check_cmd"; then
+    if [ "$IS_HEQET" = true ]; then
+      echo -e "${BRED}Остановка. $name уже установлен(а).${NC}"
+      echo
+      echo -e "${WHT}Предыдущая установка могла завершиться с ошибкой или быть выполнена частично.${NC}"
+      echo -e "${WHT}Загрузитесь с ISO-образа Heqet, чтобы начать новую установку.${NC}"
+      echo
+      echo -e "${CYAN}Скрипт завершает работу. До свидания.${NC}"
+      echo
     else
-      # Если команда refresh_signatures завершилась с ошибкой:
-      log "Command 'fwconsole ma refreshsignatures' failed to execute with exit status $exit_status, running as a background job"
-      refresh_signatures &  # Запускаем обновление подписей в фоновом режиме
-      log "Continuing the remaining script execution"
-      break                 # Прерываем цикл: дальше скрипт должен идти дальше, не дожидаясь завершения фоновой задачи
+      echo -e "${BRED}Остановка. $name уже установлен(а). Скрипт не предназначен для обновления поверх существующей установки.${NC}"
+      echo
+    fi
+    exit 1
+  else
+    echo -e "Существующая установка $name не найдена. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  fi
+}
+
+# --- Финальное сообщение об успешной установке ---
+# Выводит сводку: IP-адрес, URL входа, затраченное время.
+print_completion() {
+  local elapsed=$(( $(date +%s) - START_TIME ))
+  local minutes=$((elapsed / 60))
+  local seconds=$((elapsed % 60))
+  local ip=$(hostname -I | awk '{print $1}')
+  local border="════════════════════════════════════════════════════════"
+
+  echo
+  echo "${border}"
+  echo -e "${BGRN}  Установка FreePBX 17 успешно завершена!${NC}"
+  echo "${border}"
+  echo
+  echo -e "  Версия скрипта: ${WHT}${VERSION}${NC}"
+  echo -e "  IP-адрес сервера: ${BGRN}${ip}${NC}"
+  echo -e "  URL для входа: ${BGRN}http://${ip}${NC}"
+  echo -e "  Длительность установки: ${WHT}${minutes} мин ${seconds} сек${NC}"
+  echo
+  echo "${border}"
+  echo -e "${CYAN}  До свидания. Спасибо за использование скрипта.${NC}"
+  echo "${border}"
+  echo
+}
+
+
+# ===================================================================================
+# ФУНКЦИИ ПРОВЕРКИ ЗЕРКАЛ FreePBX
+# Проверяют доступность зеркал модулей и APT-репозитория через
+# внешний сервис mirrors.in1.click
+# ===================================================================================
+
+
+MIRROR_ATTEMPTS=0           # Счётчик выполненных попыток в текущем цикле
+MIRROR_OK=false             # Флаг: хотя бы одно зеркало прошло проверку
+MIRROR_GOOD_COUNT=0         # Количество успешных проверок из MIRROR_MAX
+mirror_status=""            # Статус зеркал модулей: good/warn/bad/server/unreachable/unknown
+deb_status=""               # Статус APT-репозитория: good/captcha/bad/invalid/unknown
+
+# --- Однократная проверка состояния зеркал ---
+# Загружает и выполняет скрипт проверки с mirrors.in1.click,
+# анализирует его вывод для определения статуса.
+mirror_check_once() {
+  local output_file
+  output_file="$(mktemp)"
+
+  # Загружаем скрипт проверки, удаляем из него интерактивный prompt
+  # (чтобы он не ждал ввода пользователя) и выполняем
+  if ! curl -fsS "https://in1.click/mirrors/cli.sh" 2>/dev/null \
+    | sed '/^read -r -p/,$d' \
+    | bash 2>&1 | tee "$output_file"; then
+    mirror_status="unreachable"
+    deb_status="unknown"
+    rm -f "$output_file"
+    return
+  fi
+
+  # Анализируем вывод скрипта — определяем статус зеркал модулей
+  if grep -Fq "It should be safe to proceed with module updates." "$output_file"; then
+    mirror_status="good"
+  elif grep -Fq "Degraded performance. Mirrors responding but not fully healthy — proceed with caution." "$output_file"; then
+    mirror_status="warn"
+  elif grep -Fq "Mirrors unstable. Hold fire on updates until things improve." "$output_file"; then
+    mirror_status="bad"
+  elif grep -Fq "Our monitoring server is struggling. Results unreliable — hold fire and retry shortly." "$output_file"; then
+    mirror_status="server"
+  else
+    mirror_status="unknown"
+  fi
+
+  # Анализируем вывод — определяем статус APT-репозитория (deb.freepbx.org)
+  if grep -Fq "Packages.gz valid" "$output_file"; then
+    deb_status="good"
+  elif grep -Fq "captcha page instead of Packages.gz" "$output_file"; then
+    deb_status="captcha"
+  elif grep -Fq "FreePBX installations will fail" "$output_file"; then
+    deb_status="bad"
+  elif grep -Fq "not valid gzip data" "$output_file"; then
+    deb_status="invalid"
+  else
+    deb_status="unknown"
+  fi
+
+  rm -f "$output_file"
+}
+
+# --- Вывод статуса одной проверки ---
+# Расшифровывает результаты mirror_check_once для пользователя.
+# Увеличивает MIRROR_GOOD_COUNT, если оба компонента здоровы.
+print_mirror_status() {
+  if [ "$mirror_status" = "good" ] && [ "$deb_status" = "good" ]; then
+    MIRROR_GOOD_COUNT=$((MIRROR_GOOD_COUNT + 1))
+    echo -e "Проверьте https://in1.click/mirrors в браузере. ${WHT}($MIRROR_GOOD_COUNT/$MIRROR_MAX проверок пройдено)${NC}"
+  elif [ "$mirror_status" = "good" ] && [ "$deb_status" != "good" ]; then
+    echo -e "${BYEL}Зеркала модулей стабильны, но репозиторий deb.freepbx.org (APT) работает нестабильно.${NC}"
+  elif [ "$mirror_status" = "unreachable" ]; then
+    echo -e "${BRED}Не удаётся связаться с сервисом проверки зеркал. Возможно, ваш IP-адрес заблокирован Cloudflare.${NC}"
+  elif [ "$mirror_status" = "bad" ]; then
+    echo -e "${BRED}Зеркала недоступны или сильно деградировали.${NC}"
+  elif [ "$mirror_status" = "warn" ]; then
+    echo -e "${BYEL}Зеркала отвечают, но не полностью исправны.${NC}"
+  elif [ "$mirror_status" = "server" ]; then
+    echo -e "${BYEL}Сам сервер мониторинга испытывает проблемы.${NC}"
+  else
+    echo -e "${BRED}Статус зеркала не удалось определить.${NC}"
+  fi
+}
+
+# --- Цикл проверки зеркал (до MIRROR_MAX попыток) ---
+# Выполняет несколько проверок с паузами между ними.
+run_mirror_checks() {
+  MIRROR_ATTEMPTS=0
+  MIRROR_GOOD_COUNT=0
+  while [ "$MIRROR_ATTEMPTS" -lt "$MIRROR_MAX" ]; do
+    MIRROR_ATTEMPTS=$((MIRROR_ATTEMPTS + 1))
+    echo -e "\n${BGRN}Используем mirrors.in1.click для проверки официальных зеркал FreePBX… (попытка $MIRROR_ATTEMPTS/$MIRROR_MAX)${NC}\n"
+    mirror_check_once
+    print_mirror_status
+    # Пауза перед следующей попыткой, кроме последней
+    if [ "$MIRROR_ATTEMPTS" -lt "$MIRROR_MAX" ]; then
+      countdown "$MIRROR_RETRY_DELAY_S"
     fi
   done
-fi
+}
 
-# -----------------------------------------------------------------------------------
-# Шаг 18 - Сообщаем, что установка FreePBX 17 успешно завершена
-# -----------------------------------------------------------------------------------
-setCurrentStep "FreePBX 17 Installation finished successfully."
+# --- Интерактивный диалог при сбое зеркал ---
+# Если все проверки провалились, предлагает пользователю выбор:
+# повторить, прервать или продолжить вопреки предупреждению.
+mirror_failure_dialog() {
+  while [ "$MIRROR_OK" = false ]; do
+    # --- Неинтерактивный режим: выводим диагностику и выходим ---
+    if [ "$IS_HEQET" = true ] || [ "$IS_NONINTERACTIVE" = true ]; then
+      echo
+      echo -e "${BRED}Зеркала FreePBX недоступны после $MIRROR_MAX попыток.${NC}"
+      echo
+      echo -e "${WHT}Скрипт не может установить FreePBX без рабочих зеркал.${NC}"
+      echo -e "${WHT}Это не проблема вашей системы — зеркала на стороне поставщика не отвечают корректно.${NC}"
+      echo
+      # Подсказка: по субботам зеркала часто перегружены
+      if [ "$(date +%u)" -eq 6 ]; then
+        echo -e "${BYEL}Сегодня суббота — официальные зеркала FreePBX могут быть перегружены.${NC}"
+        echo -e "${BYEL}Попробуйте снова завтра.${NC}"
+        echo
+      fi
+      echo -e "${BYEL}Что делать дальше:${NC}"
+      echo
+      echo -e "${WHT}  1. Подождите до 15 минут, затем запустите установщик снова.${NC}"
+      echo
+      echo -e "${WHT}     Проверить статус в браузере:${NC}"
+      echo -e "${BGRN}       https://in1.click/mirrors${NC}"
+      echo
+      echo -e "${WHT}     Или из терминала:${NC}"
+      echo -e "${BGRN}       curl mirrors.in1.click | sh${NC}"
+      echo
+      echo -e "${WHT}  2. Как только зеркала станут стабильными, запустите установщик снова.${NC}"
+      echo
+      echo -e "${WHT}  3. Если проблема сохраняется, обратитесь в службу поддержки.${NC}"
+      echo
+      echo -e "${CYAN}Скрипт прекращает установку. До свидания.${NC}"
+      echo
+      exit 1
+    fi
+
+    # --- Интерактивный режим: показываем меню выбора ---
+    echo
+    echo -e "${WHT}Установка приостановлена.${NC}"
+    echo
+    echo -e "${BYEL}Зеркала нестабильны!${NC}"
+    echo -e "${BYEL} 1) Проверить зеркала снова${NC}"
+    echo -e "${BYEL} 2) Прервать установку${NC}"
+    echo -e "${BYEL} 3) Продолжить в любом случае${NC}"
+    printf "${BYEL}Внимание. Попробовать снова? [1]: ${NC}"
+    read -r mirror_choice
+
+    case "$mirror_choice" in
+      ""|1)
+        # Повторная проверка зеркал
+        run_mirror_checks
+        if [ "$MIRROR_GOOD_COUNT" -gt 0 ]; then
+          MIRROR_OK=true
+        else
+          echo -e "${BRED}Все зеркала по-прежнему недоступны.${NC}"
+        fi
+        ;;
+      3)
+        # Игнорировать предупреждения и продолжить
+        echo -e "${BYEL}Продолжаем, несмотря на предупреждения о состоянии зеркал.${NC}"
+        MIRROR_OK=true
+        ;;
+      2)
+        # Прервать установку
+        echo -e "${BRED}Прерывание установки из-за проблем со статусом зеркал.${NC}"
+        echo
+        echo "Вы можете перезапустить скрипт следующей командой:"
+        echo
+        echo "curl https://freepbx.in1.click | sh"
+        echo
+        echo -e "${CYAN}До свидания.${NC}"
+        exit 1
+        ;;
+      *)
+        echo -e "${BRED}Неверный выбор. Пожалуйста, попробуйте снова.${NC}"
+        ;;
+    esac
+  done
+}
+
+
+# ===================================================================================
+# БЛОК ПРЕДВАРИТЕЛЬНЫХ ПРОВЕРОК СИСТЕМЫ
+# Гарантирует, что ОС и окружение подходят под требования FreePBX 17
+# ===================================================================================
+
+
+preflight_system_checks() {
+  # --- Приветствие ---
+  echo
+  echo -e "${CYAN}Здравствуйте. Запуск скрипта установки FreePBX 17 на Debian 12 (bookworm).${NC}"
+  sleep 4
+  echo
+  echo -e "${BYEL}Версия скрипта: ${VERSION}.${NC}"
+  sleep 4
+
+  # --- Отключение unattended-upgrades на время установки ---
+  # Автоматические обновления могут конфликтовать с установщиком FreePBX
+  print_step "Отключение unattended-upgrades на время установки..."
+  systemctl stop unattended-upgrades 2>/dev/null || true
+  systemctl stop apt-daily.timer 2>/dev/null || true
+  systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+  systemctl stop apt-daily.service 2>/dev/null || true
+  systemctl stop apt-daily-upgrade.service 2>/dev/null || true
+  echo -e "Автоматические обновления отключены. ${WHT}Можно продолжать.${NC}"
+  sleep $SLEEP_DELAY
+
+  # --- Определение запуска с ISO-образа Heqet ---
+  # Если найдены служебные service-файлы — считаем, что это Heqet ISO
+  print_step "Проверка ISO-образа Heqet..."
+  if [ -f /etc/systemd/system/fpbx-installer-firstboot.service ] \
+     || [ -f /etc/systemd/system/fpbx-installer-cleanup.service ]; then
+    IS_HEQET=true
+    echo -e "ISO-образ Heqet обнаружен. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "ISO-образ Heqet не обнаружен. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка версии ОС ---
+  print_step "Проверка версии ОС (Debian 12)..."
+  if grep -q 'Debian GNU/Linux 12' /etc/os-release; then
+    echo -e "Debian 12 подтверждён. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  else
+    echo -e "${BRED}Скрипт поддерживается только на Debian 12. Завершение работы.${NC}"
+    exit 1
+  fi
+
+  # --- Проверка свободного места на диске ---
+  print_step "Проверка свободного места на диске..."
+  local available_kb
+  available_kb=$(df / | tail -1 | awk '{print $4}')
+  if (( available_kb < REQUIRED_DISK_KB )); then
+    echo -e "${BRED}Недостаточно места на корневом разделе (/). Требуется минимум 10 ГБ.${NC}"
+    echo -e "Доступно: $(awk "BEGIN {printf \"%.2f\", $available_kb/1024/1024}") ГБ."
+    exit 1
+  else
+    echo -e "Доступно: $(awk "BEGIN {printf \"%.2f\", $available_kb/1024/1024}") ГБ. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка памяти и swap ---
+  print_step "Проверка оперативной памяти и swap..."
+  local total_mem_kb total_swap_kb total_mem_mb total_swap_mb
+  total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  total_swap_kb=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+  total_mem_mb=$(( total_mem_kb / 1024 ))
+  total_swap_mb=$(( total_swap_kb / 1024 ))
+
+  # Сценарий 1: RAM слишком мала и swap отсутствует — критично
+  if (( total_mem_mb < MIN_RAM_MB )) && (( total_swap_mb < MIN_SWAP_MB )); then
+    echo -e "${BRED}Недостаточно памяти. FreePBX 17 требует минимум 1 ГБ RAM.${NC}"
+    echo -e "${WHT}В системе ${total_mem_mb} МБ RAM и swap не настроен.${NC}"
+    echo -e "${WHT}Установщик, скорее всего, будет убит ядром (OOM) до завершения.${NC}"
+    echo
+    if [ "$IS_HEQET" = true ] || [ "$IS_NONINTERACTIVE" = true ]; then
+      echo -e "${BYEL}Неинтерактивная установка: продолжаем несмотря на нехватку памяти.${NC}"
+      echo -e "${WHT}Если установка упадёт — добавьте swap и повторите:${NC}"
+      echo -e "${BGRN}  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile${NC}"
+    else
+      echo -e "${BYEL} 1) Продолжить в любом случае${NC}"
+      echo -e "${BYEL} 2) Прервать установку${NC}"
+      echo
+      read -r -p "$(echo -e "${BYEL}Выбор [2]: ${NC}")" mem_choice
+      case "${mem_choice:-2}" in
+        1)
+          echo -e "${BYEL}Продолжаем несмотря на нехватку памяти. Удачи.${NC}"
+          echo -e "${WHT}Добавить swap можно в другой сессии:${NC}"
+          echo -e "${BGRN}  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile${NC}"
+          ;;
+        *)
+          echo
+          echo -e "${CYAN}До свидания.${NC}"
+          echo
+          exit 1
+          ;;
+      esac
+    fi
+  # Сценарий 2: RAM меньше 1 ГБ, но swap есть — предупреждение
+  elif (( total_mem_mb < MIN_RAM_WARN_MB )) && (( total_swap_mb < MIN_SWAP_MB )); then
+    echo -e "${BYEL}ПРЕДУПРЕЖДЕНИЕ: Обнаружено менее 1 ГБ RAM (${total_mem_mb} МБ). Продолжаем...${NC}"
+    echo -e "${WHT}Если установка упадёт с OOM — добавьте swap и повторите:${NC}"
+    echo -e "${BGRN}  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile${NC}"
+  # Сценарий 3: памяти достаточно
+  else
+    echo -e "Память: ${total_mem_mb} МБ, Swap: ${total_swap_mb} МБ. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка архитектуры ---
+  # FreePBX 17 поддерживает только x86_64
+  print_step "Проверка архитектуры системы..."
+  local arch
+  arch=$(uname -m)
+  if [[ "$arch" != "x86_64" ]]; then
+    echo -e "${BRED}Неподдерживаемая архитектура: $arch. Требуется 64-битная (x86_64).${NC}"
+    exit 1
+  else
+    echo -e "Архитектура: 64-бит. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка формата имени хоста ---
+  # Имя хоста не должно состоять только из цифр — это ломает FreePBX
+  print_step "Проверка формата имени хоста..."
+  local host hostname_label
+  host=$(hostname)
+  hostname_label="${host%%.*}"
+  if [[ ! "$host" =~ ^[a-z0-9.-]+$ ]]; then
+    echo -e "${BRED}Неверный формат имени хоста. Используйте только строчные буквы, цифры и дефисы. Завершение работы.${NC}"
+    exit 1
+  fi
+  # Если метка состоит только из цифр — устанавливаем стандартное имя
+  if [[ "$hostname_label" =~ ^[0-9]+$ ]]; then
+    echo -e "${BYEL}Метка имени хоста состоит только из цифр. Устанавливаем freepbx.sangoma.local...${NC}"
+    echo
+    hostnamectl set-hostname "freepbx.sangoma.local"
+    echo -e "  - Имя хоста установлено в freepbx.sangoma.local"
+    echo
+    echo "freepbx.sangoma.local" > /etc/hostname
+    echo -e "  - Файл /etc/hostname обновлён"
+    echo
+    sed -i "s/127.0.1.1.*/127.0.1.1\tfreepbx.sangoma.local freepbx/" /etc/hosts
+    echo -e "  - Файл /etc/hosts обновлён"
+    echo
+    # Проверяем, что новое имя корректно
+    host=$(hostname)
+    hostname_label="${host%%.*}"
+    if [[ "$hostname_label" =~ ^[0-9]+$ ]]; then
+      echo -e "${BRED}Недопустимая метка имени хоста: не должна состоять только из цифр. Завершение работы.${NC}"
+      exit 1
+    fi
+  fi
+  echo -e "Метка имени хоста корректна. ${WHT}Можно продолжать.${NC}"
+  sleep $SLEEP_DELAY
+
+  # --- Проверка среды рабочего стола ---
+  # FreePBX требует минимальную установку без GUI
+  print_step "Проверка среды рабочего стола..."
+  if [[ -n "${XDG_CURRENT_DESKTOP:-}" || -d /usr/share/xsessions ]]; then
+    echo -e "${BRED}Обнаружена среда рабочего стола. Для FreePBX требуется минимальная конфигурация Debian. Завершение работы.${NC}"
+    exit 1
+  else
+    echo -e "Среда рабочего стола не обнаружена. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  fi
+
+  # --- Проверка монтирования /tmp ---
+  # Флаг noexec на /tmp мешает установщику FreePBX
+  print_step "Проверка прав на /tmp..."
+  if mount | grep '/tmp' | grep -q noexec; then
+    echo -e "${BRED}/tmp смонтирован с флагом noexec. Это нарушит установку FreePBX. Перемонтируйте или исправьте fstab.${NC}"
+    exit 1
+  else
+    echo -e "/tmp доступен для записи и выполнения. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК ПРОВЕРОК КОНФЛИКТОВ
+# Проверяет, что целевые компоненты ещё не установлены —
+# скрипт не предназначен для обновления поверх существующей установки.
+# ===================================================================================
+
+
+preflight_conflict_checks() {
+  # --- Существующая установка FreePBX ---
+  check_existing_install "FreePBX" \
+    '[[ -f /etc/freepbx.conf || -d /var/www/html/admin ]]'
+
+  # --- Существующая установка Asterisk ---
+  check_existing_install "Asterisk" \
+    'command -v asterisk >/dev/null 2>&1 || systemctl list-units --type=service | grep -q "asterisk"'
+
+  # --- Существующая установка MariaDB ---
+  check_existing_install "MariaDB" \
+    'systemctl list-units --type=service | grep -q "mariadb" || command -v mariadbd >/dev/null 2>&1'
+
+  # --- Проверка Node.js ---
+  # Node.js не блокирует установку, но предупреждаем о возможных конфликтах
+  print_step "Проверка Node.js..."
+  if command -v node >/dev/null 2>&1; then
+    local node_version
+    node_version=$(node -v)
+    echo -e "${BRED}ВНИМАНИЕ: Node.js уже установлен (${node_version}). ${BYEL}Продолжаем в любом случае...${NC}"
+  else
+    echo -e "Установленная версия Node.js не найдена. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+}
+
+
+# ===================================================================================
+# БЛОК ПОДГОТОВКИ APT
+# Проверяет и исправляет источники пакетов, обновляет списки и сами пакеты.
+# Также блокирует нежелательные репозитории (stable → bookworm, trixie → отключение).
+# ===================================================================================
+
+
+preflight_apt_prepare() {
+  # --- Проверка и исправление источников APT ---
+  # Если источники не указывают на официальные зеркала Debian — перезаписываем
+  print_step "Проверка источников APT..."
+  local apt_sources_ok=false
+  if grep -qE 'deb(\.|-security\.)debian\.org' /etc/apt/sources.list 2>/dev/null; then
+    apt_sources_ok=true
+  fi
+  if grep -qrE 'debian\.org' /etc/apt/sources.list.d/ 2>/dev/null; then
+    apt_sources_ok=true
+  fi
+  if [ "$apt_sources_ok" = false ]; then
+    echo -e "${BYEL}Источники APT не указывают на официальные зеркала Debian. Перезаписываем...${NC}"
+    cat > /etc/apt/sources.list << 'EOF'
+deb http://deb.debian.org/debian bookworm main
+deb http://deb.debian.org/debian bookworm-updates main
+deb http://security.debian.org/debian-security bookworm-security main
+EOF
+    echo -e "Источники APT перезаписаны. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "Источники APT указывают на официальные зеркала Debian. ${WHT}Можно продолжать.${NC}"
+  fi
+
+  # --- Удаление зеркал провайдера (например, DigitalOcean) ---
+  # Эти зеркала могут быть недоступны или конфликтовать
+  if [ -d /etc/apt/mirrors ]; then
+    rm -f /etc/apt/mirrors/*.list 2>/dev/null || true
+    echo -e "Файлы списков зеркал провайдера удалены. ${WHT}Можно продолжать.${NC}"
+    echo
+  fi
+  if grep -q 'mirror+file\|mirrorlist\|mirrors\.' /etc/apt/sources.list.d/debian.sources 2>/dev/null; then
+    rm -f /etc/apt/sources.list.d/debian.sources
+    echo -e "Файл debian.sources провайдера удалён. ${WHT}Можно продолжать.${NC}"
+    echo
+  fi
+  if grep -rlE 'digitalocean|mirrors\.' /etc/apt/sources.list.d/ 2>/dev/null | grep -q .; then
+    grep -rlE 'digitalocean|mirrors\.' /etc/apt/sources.list.d/ | xargs rm -f
+    echo -e "Записи sources.list.d провайдера удалены. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Блокировка репозиториев stable и trixie ---
+  # 'stable' — синоним, который может указывать на неправильную версию;
+  # 'trixie' (Debian 13) — не поддерживается FreePBX 17
+  print_step "Проверка и исправление запрещённых источников APT (stable/trixie)..."
+  local fixed=0
+  for src in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+    [ -f "$src" ] || continue
+    if grep -q 'stable' "$src"; then
+      sed -i 's/stable/bookworm/g' "$src"
+      echo -e "${BYEL}Заменено «stable» на «bookworm» в $src.${NC}"
+      fixed=1
+    fi
+    if grep -q 'trixie' "$src"; then
+      sed -i '/trixie/s/^/# DISABLED BY INSTALLER: /' "$src"
+      echo -e "${BYEL}Строки с «trixie» закомментированы в $src.${NC}"
+      fixed=1
+    fi
+  done
+  if [ "$fixed" -eq 1 ]; then
+    echo -e "${BRED}Источники APT были автоматически исправлены. Проверьте свои источники при проблемах.${NC}"
+  else
+    echo -e "Запрещённых записей в источниках APT нет. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Ожидание блокировок APT перед update ---
+  print_step "Проверка блокировок APT перед обновлением списков пакетов..."
+  wait_apt_lock "$APT_LOCK_TIMEOUT_S"
+
+  # --- apt update ---
+  print_step "Обновление списков пакетов..."
+  apt update -qq > /dev/null 2>&1
+  echo -e "Списки пакетов обновлены. ${WHT}Можно продолжать.${NC}"
+  sleep $SLEEP_DELAY
+
+  # --- Повторная проверка trixie после apt update ---
+  # apt update может подтянуть новые источники из добавленных репозиториев
+  print_step "Проверка ссылок на Debian 13 (trixie) после обновления..."
+  local trixie_found=0
+  for src in /etc/apt/sources.list /etc/apt/sources.list.d/* /var/lib/apt/lists/*; do
+    [ -f "$src" ] || continue
+    if grep -q 'trixie' "$src"; then
+      sed -i '/trixie/s/^/# DISABLED BY INSTALLER: /' "$src"
+      echo -e "${BYEL}Строки с «trixie» закомментированы в $src после обновления.${NC}"
+      trixie_found=1
+    fi
+  done
+  if [ "$trixie_found" -eq 1 ]; then
+    echo -e "${BRED}Источники APT были исправлены для «trixie». Проверьте настройки при проблемах.${NC}"
+  else
+    echo -e "Упоминаний «trixie» после обновления не найдено. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- apt upgrade ---
+  # Используем noninteractive, чтобы dpkg не задавал вопросов
+  # о конфигурационных файлах (сохраняем старые)
+  print_step "Обновление пакетов... Это может занять время."
+  local upgrade_output
+  upgrade_output=$(DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" upgrade 2>/dev/null)
+  if echo "$upgrade_output" | grep -q '0 upgraded'; then
+    echo -e "Все пакеты уже актуальны. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "Пакеты успешно обновлены. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка необходимости перезагрузки ---
+  # Если обновилось ядро или системные библиотеки — перезагрузка обязательна
+  if [ "$IS_HEQET" = false ] && [ "$IS_NONINTERACTIVE" = false ] && [ -f /var/run/reboot-required ]; then
+    echo
+    echo -e "${BRED}Требуется перезагрузка перед установкой FreePBX.${NC}"
+    echo -e "${WHT}Обычно это вызвано обновлением ядра или системных библиотек.${NC}"
+    echo
+    echo -e "${BYEL}Скрипт перезагрузит сервер прямо сейчас.${NC}"
+    echo -e "${WHT}После перезагрузки запустите установщик снова командой:${NC}"
+    echo -e "${BGRN}  curl https://freepbx.in1.click | sh${NC}"
+    echo
+    read -r -p "$(echo -e "${BYEL}Нажмите Enter для перезагрузки или Ctrl+C для отмены: ${NC}")"
+    reboot
+    exit 0
+  fi
+
+  # --- Повторная проверка ОС ---
+  # После upgrade дистрибутив мог измениться — проверяем снова
+  print_step "Повторная проверка версии ОС (Debian 12)..."
+  if grep -q 'Debian GNU/Linux 12' /etc/os-release; then
+    echo -e "Подтверждено: Debian 12. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  else
+    echo -e "${BRED}Скрипт поддерживается только на Debian 12. Завершение работы.${NC}"
+    exit 1
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК СЕТЕВЫХ ПРОВЕРОК
+# Проверяет наличие сетевого интерфейса, корректность DNS,
+# отсутствие конфликтов на порту 80 и доступность необходимых инструментов.
+# ===================================================================================
+
+
+preflight_network_checks() {
+  # --- Проверка сетевого интерфейса и типа IP ---
+  print_step "Проверка сетевого интерфейса и типа IP-адреса..."
+  local iface ip_info
+  iface=$(ip -o -4 addr show | awk '{print $2}' | head -n1)
+  if [[ -z "$iface" ]]; then
+    echo -e "${BRED}Не найден активный сетевой интерфейс с IPv4-адресом. Скрипт не может продолжить работу.${NC}"
+    echo
+    echo -e "${CYAN}До свидания.${NC}"
+    echo
+    exit 1
+  fi
+  ip_info=$(ip -o -4 addr show "$iface")
+  if echo "$ip_info" | grep -q 'dynamic'; then
+    echo -e "${BRED}ВНИМАНИЕ: IP-адрес назначен динамически (DHCP). ${BYEL}Продолжаем в любом случае...${NC}"
+  elif echo "$ip_info" | grep -q 'inet'; then
+    echo -e "Обнаружен статический IP-адрес. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "${BRED}ВНИМАНИЕ: Не удалось определить тип назначения IP-адреса. ${BYEL}Продолжаем в любом случае...${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка iptables ---
+  print_step "Проверка iptables..."
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo -e "${BRED}ВНИМАНИЕ: iptables не найден. ${BYEL}Устанавливаем...${NC}"
+    echo
+    apt install -y iptables
+    echo
+    echo -e "iptables успешно установлен. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "iptables уже установлен. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка активных правил iptables ---
+  # Правила DROP/REJECT могут блокировать доступ к веб-интерфейсу или SIP
+  print_step "Проверка активных правил iptables..."
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo -e "${BRED}ВНИМАНИЕ: iptables не найден. ${BYEL}Продолжаем в любом случае...${NC}"
+  else
+    if iptables -L -n | grep -q 'DROP\|REJECT'; then
+      echo -e "${BRED}ВНИМАНИЕ: обнаружены правила iptables, которые могут блокировать доступ к веб-интерфейсу или SIP. ${BYEL}Продолжаем в любом случае...${NC}"
+    else
+      echo -e "Активные правила DROP/REJECT в iptables не обнаружены. ${WHT}Можно продолжать.${NC}"
+    fi
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка конфликта порта 80 ---
+  # Если порт 80 занят не Apache — FreePBX не сможет запустить веб-интерфейс
+  print_step "Проверка конфликта на порту 80..."
+  if ss -tlnp | grep ':80 ' | grep -vq 'apache2'; then
+    echo -e "${BRED}ВНИМАНИЕ: порт 80 уже используется процессом, не являющимся Apache.${NC}"
+    echo -e "FreePBX может не запуститься, либо веб-интерфейс будет недоступен."
+    echo -e "Проверьте с помощью команды: ${WHT}ss -tlnp | grep ':80'${NC}"
+  else
+    echo -e "Конфликтов на порту 80 не обнаружено. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка DNS ---
+  print_step "Проверка разрешения DNS..."
+  if ! host cloudflare.com >/dev/null 2>&1; then
+    echo -e "${BRED}Сбой разрешения DNS. Исправьте настройки DNS перед продолжением.${NC}"
+    exit 1
+  else
+    echo -e "Разрешение DNS работает корректно. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  fi
+
+  # --- Проверка curl ---
+  print_step "Проверка curl..."
+  if ! command -v curl >/dev/null 2>&1; then
+    echo -e "${BRED}ВНИМАНИЕ: curl не найден. ${BYEL}Устанавливаем...${NC}"
+    apt install -y curl
+    echo
+    echo -e "curl успешно установлен. ${WHT}Можно продолжать.${NC}"
+    echo
+  else
+    echo -e "curl установлен. ${WHT}Можно продолжать.${NC}"
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК ПРОВЕРКИ ЗЕРКАЛ FreePBX
+# Запускает цикл проверок и, при необходимости, интерактивный диалог.
+# ===================================================================================
+
+
+preflight_mirror_checks() {
+  run_mirror_checks
+
+  # Если все проверки пройдены — отлично, продолжаем
+  if [ "$MIRROR_GOOD_COUNT" -eq "$MIRROR_MAX" ]; then
+    echo
+    echo -e "${BGRN}Все $MIRROR_MAX проверок пройдены. ${WHT}Можно продолжать.${NC}"
+    MIRROR_OK=true
+  else
+    MIRROR_OK=false
+  fi
+
+  # Если хотя бы одна проверка провалилась — запускаем диалог
+  if [ "$MIRROR_OK" = false ]; then
+    mirror_failure_dialog
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК ПРОВЕРКИ ДОСТУПНОСТИ УСТАНОВЩИКА
+# Проверяет, что установщик FreePBX доступен на GitHub
+# и что есть исходящий интернет.
+# ===================================================================================
+
+
+preflight_installer_checks() {
+  # --- Проверка доступности установщика на GitHub ---
+  print_step "Проверка доступности установщика FreePBX на GitHub..."
+  if ! curl -sSfI --max-time 10 \
+     https://raw.githubusercontent.com/FreePBX/sng_freepbx_debian_install/master/sng_freepbx_debian_install.sh \
+     >/dev/null; then
+    echo -e "${BRED}Не удалось получить доступ к установщику FreePBX на GitHub.${NC}"
+    echo -e "Проверьте подключение к интернету, настройки DNS или ограничения фаервола."
+    echo
+    echo -e "${BRED}Завершение работы: скрипт не может продолжить без установщика FreePBX.${NC}"
+    echo
+    exit 1
+  else
+    echo -e "Установщик FreePBX на GitHub доступен. ${WHT}Можно продолжать.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Проверка исходящего интернета ---
+  print_step "Проверка исходящего интернет-соединения (публичный IP)..."
+  local public_ip
+  public_ip=$(curl -s --max-time 10 ifconfig.me)
+  if [[ -n "$public_ip" ]]; then
+    echo -e "Исходящее интернет-соединение подтверждено. Публичный IP: ${WHT}$public_ip. Можно продолжать.${NC}"
+  else
+    echo -e "${BRED}Не удалось получить ответ от ifconfig.me или соединение отсутствует.${NC}"
+    echo -e "${BRED}Завершение работы: скрипт не может продолжить без доступа в интернет.${NC}"
+    exit 1
+  fi
+  sleep 4
+
+  # --- Ожидание блокировок APT перед установкой ---
+  print_step "Проверка блокировок APT перед установкой FreePBX 17..."
+  wait_apt_lock "$APT_LOCK_INSTALL_TIMEOUT_S"
+}
+
+
+# ===================================================================================
+# БЛОК ЗАПУСКА В SCREEN
+# Запускает установку в сессии screen, чтобы установка продолжалась
+# при отключении SSH-сессии. При повторном входе предлагает переподключиться.
+# ===================================================================================
+
+
+launch_in_screen() {
+  # Если уже внутри screen или неинтерактивный режим — пропускаем
+  if [ -z "${STY:-}" ] && [ "$IS_NONINTERACTIVE" = false ]; then
+    apt-get install -y screen -qq > /dev/null 2>&1
+
+    # Скрипт переподключения, который срабатывает при новом входе в систему
+    cat > /etc/profile.d/fpbx-reattach.sh << 'PROFILE'
+#!/bin/bash
+if screen -ls fpbx-install | grep -q fpbx-install; then
+  echo
+  echo "Установка FreePBX продолжает работать в фоновом режиме."
+  echo
+  echo "  1) Да — посмотреть вывод"
+  echo "  2) Нет — оставить работать"
+  echo "  3) Остановить — прервать установку"
+  echo
+  read -r -p "  Выбор [1]: " choice
+  case "${choice:-1}" in
+    1) screen -D -r fpbx-install ;;
+    2) ;;
+    3)
+      ELAPSED=$(( $(date +%s) - $(stat -c %Y /etc/profile.d/fpbx-reattach.sh) ))
+      echo
+      echo "  ВНИМАНИЕ: установка работает уже $((ELAPSED / 60)) мин $((ELAPSED % 60)) сек."
+      echo "  Прерывание сейчас может оставить систему в нерабочем состоянии."
+      echo
+      read -r -p "  Вы уверены? [y/N]: " confirm
+      if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        screen -S fpbx-install -X stuff $'\003'
+        rm -f /etc/profile.d/fpbx-reattach.sh
+        echo "  Установка прервана. Система может находиться в нерабочем состоянии."
+      fi
+      ;;
+  esac
+  echo
+fi
+PROFILE
+    chmod +x /etc/profile.d/fpbx-reattach.sh
+
+    # Перезапускаем скрипт внутри screen с флагом --skip-checks
+    screen -S fpbx-install bash "$0" --skip-checks "$@"
+
+    print_completion
+    exit 0
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК ВЫБОРА И ПРИМЕНЕНИЯ ЗЕРКАЛА FreePBX
+# Позволяет выбрать альтернативное зеркало (например, для РФ)
+# и применить его к новой или существующей установке.
+# ===================================================================================
+
+
+# --- Показ текущего выбранного зеркала ---
+show_current_mirror() {
+  if [[ -z "$SELECTED_MIRROR" ]]; then
+    echo -e "  Текущее зеркало: ${BYEL}не выбрано${NC}"
+  else
+    echo -e "  Текущее зеркало: ${BGRN}$SELECTED_MIRROR_NAME${NC}"
+    echo -e "  URL: ${WHT}$SELECTED_MIRROR${NC}"
+  fi
+}
+
+# --- Меню выбора зеркала ---
+# Предлагает преднастроенные зеркала и возможность ввести свой URL.
+select_mirror() {
+  echo
+  echo -e "${BMAG}╔═══════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${BMAG}║          ВЫБОР ЗЕРКАЛА FreePBX 17                          ║${NC}"
+  echo -e "${BMAG}╚═══════════════════════════════════════════════════════════╝${NC}"
+  echo
+
+  show_current_mirror
+  echo
+  echo -e "  ${WHT}Доступные зеркала:${NC}"
+  echo
+
+  # Выводим список зеркал из массива MIRRORS
+  local i=1
+  for mirror in "${MIRRORS[@]}"; do
+    local name url gpg
+    IFS='|' read -r name url gpg <<< "$mirror"
+    if [[ "$i" -eq 1 ]]; then
+      echo -e "  ${BGRN}$i)${NC} $name ${BYEL}(рекомендуется для РФ)${NC}"
+    else
+      echo -e "  ${BGRN}$i)${NC} $name"
+    fi
+    echo -e "     URL: ${WHT}$url${NC}"
+    echo
+    i=$((i + 1))
+  done
+
+  # Дополнительный пункт — свой URL
+  local custom_idx=$(( ${#MIRRORS[@]} + 1 ))
+  echo -e "  ${BGRN}$custom_idx)${NC} Свой URL (ввести вручную)"
+  echo
+  echo -e "  ${BGRN}0)${NC} Назад в главное меню"
+  echo
+  printf "${BYEL}  Выберите зеркало [1]: ${NC}"
+  read -r mirror_choice
+
+  case "${mirror_choice:-1}" in
+    [1-9])
+      # Выбор из преднастроенного списка
+      if (( mirror_choice >= 1 && mirror_choice <= ${#MIRRORS[@]} )); then
+        local name url gpg
+        IFS='|' read -r name url gpg <<< "${MIRRORS[$((mirror_choice - 1))]}"
+        SELECTED_MIRROR_NAME="$name"
+        SELECTED_MIRROR="$url"
+        SELECTED_MIRROR_GPG="$gpg"
+        echo
+        echo -e "${BGRN}Выбрано зеркало: $name${NC}"
+        echo -e "${WHT}URL: $url${NC}"
+        echo
+        echo -e "${BYEL}Зеркало будет применено:${NC}"
+        echo -e "  • При установке FreePBX (пункт 7) — установщик будет использовать выбранное зеркало"
+        echo -e "  • Можно применить отдельно через пункт 15"
+        sleep 2
+      # Ввод собственного URL
+      elif (( mirror_choice == custom_idx )); then
+        echo
+        printf "${BYEL}  Введите URL зеркала: ${NC}"
+        read -r custom_url
+        if [[ -z "$custom_url" ]]; then
+          echo -e "${BRED}URL не введён.${NC}"
+          return
+        fi
+        printf "${BYEL}  Введите URL GPG-ключа (или Enter для пропуска): ${NC}"
+        read -r custom_gpg
+        SELECTED_MIRROR_NAME="Своё зеркало ($custom_url)"
+        SELECTED_MIRROR="$custom_url"
+        SELECTED_MIRROR_GPG="$custom_gpg"
+        echo
+        echo -e "${BGRN}Выбрано зеркало: $SELECTED_MIRROR_NAME${NC}"
+        sleep 2
+      else
+        echo -e "${BRED}Неверный выбор.${NC}"
+      fi
+      ;;
+    0)
+      return
+      ;;
+    *)
+      echo -e "${BRED}Неверный выбор.${NC}"
+      ;;
+  esac
+}
+
+# --- Применение зеркала к существующей установке ---
+# Перезаписывает /etc/apt/sources.list.d/freepbx.list и обновляет GPG-ключ.
+apply_mirror_existing() {
+  if [[ -z "$SELECTED_MIRROR" ]]; then
+    echo -e "${BRED}Зеркало не выбрано. Сначала выберите зеркало (пункт 14).${NC}"
+    sleep 2
+    return
+  fi
+
+  print_step "Применение зеркала $SELECTED_MIRROR_NAME к существующей установке..."
+
+  local freepbx_list="/etc/apt/sources.list.d/freepbx.list"
+  local old_mirror=""
+
+  # Читаем текущее зеркало из файла, если он существует
+  if [[ -f "$freepbx_list" ]]; then
+    old_mirror=$(grep -oE 'https?://[^ "]+' "$freepbx_list" | head -1)
+  fi
+
+  echo -e "  Текущее зеркало в freepbx.list: ${WHT}${old_mirror:-не найдено}${NC}"
+  echo -e "  Новое зеркало: ${BGRN}$SELECTED_MIRROR${NC}"
+  echo
+
+  # Установка GPG-ключа нового зеркала
+  if [[ -n "$SELECTED_MIRROR_GPG" ]]; then
+    print_step "Установка GPG-ключа для $SELECTED_MIRROR_NAME..."
+    if curl -fsSL "$SELECTED_MIRROR_GPG" 2>/dev/null \
+      | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/freepbx.gpg 2>/dev/null; then
+      echo -e "${BGRN}GPG-ключ установлен.${NC}"
+    else
+      echo -e "${BYEL}Не удалось установить GPG-ключ (возможно, он уже установлен).${NC}"
+    fi
+  fi
+
+  # Перезапись файла источников
+  print_step "Обновление /etc/apt/sources.list.d/freepbx.list..."
+  cat > "$freepbx_list" << EOF
+deb [arch=amd64] $SELECTED_MIRROR bookworm main
+#deb-src [arch=amd64] $SELECTED_MIRROR bookworm main
+EOF
+  echo -e "${BGRN}Файл freepbx.list обновлён.${NC}"
+  echo
+
+  # Обновление списков пакетов с новым зеркалом
+  print_step "Выполняем apt update..."
+  apt update -qq 2>/dev/null
+  echo -e "${BGRN}Списки пакетов обновлены. Зеркало $SELECTED_MIRROR_NAME активно.${NC}"
+  sleep $SLEEP_DELAY
+}
+
+# --- Подмена зеркала в установщике перед запуском ---
+# Меняет URL deb.freepbx.org на выбранное зеркало прямо в скачанном скрипте.
+patch_installer_mirror() {
+  local script_file="$1"
+
+  # Если зеркало не выбрано — ничего не делаем
+  if [[ -z "$SELECTED_MIRROR" ]]; then
+    return 0
+  fi
+
+  print_step "Подмена зеркала в установщике на $SELECTED_MIRROR_NAME..."
+
+  # Заменяем URL репозитория
+  sed -i "s|deb.freepbx.org/freepbx-17-prod|${SELECTED_MIRROR}|g" "$script_file"
+  sed -i "s|deb.freepbx.org|${SELECTED_MIRROR%/freepbx17-prod}|g" "$script_file"
+
+  # Подменяем URL GPG-ключа, если задан
+  if [[ -n "$SELECTED_MIRROR_GPG" ]]; then
+    sed -i "s|deb.freepbx.org/freepbx-17-prod/pubkey.gpg|${SELECTED_MIRROR_GPG}|g" "$script_file"
+    sed -i "s|deb.freepbx.org/pubkey.gpg|${SELECTED_MIRROR_GPG}|g" "$script_file"
+  fi
+
+  echo -e "${BGRN}Установщик пропатчен: deb.freepbx.org → $SELECTED_MIRROR${NC}"
+
+  # Предустановка GPG-ключа, чтобы установщику не пришлось его скачивать
+  if [[ -n "$SELECTED_MIRROR_GPG" ]]; then
+    print_step "Предустановка GPG-ключа для $SELECTED_MIRROR_NAME..."
+    if curl -fsSL "$SELECTED_MIRROR_GPG" 2>/dev/null \
+      | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/freepbx.gpg 2>/dev/null; then
+      echo -e "${BGRN}GPG-ключ предустановлен.${NC}"
+    else
+      echo -e "${BYEL}Не удалось предустановить GPG-ключ. Установщик может сделать это сам.${NC}"
+    fi
+  fi
+
+  sleep $SLEEP_DELAY
+}
+
+
+# ===================================================================================
+# БЛОК УСТАНОВКИ FreePBX
+# Скачивает официальный установщик FreePBX с GitHub, при необходимости
+# подменяет зеркало, и запускает установку.
+# ===================================================================================
+
+
+install_freepbx() {
+  print_step "Установка FreePBX 17..."
+  sleep $SLEEP_DELAY
+  cd /usr/src
+
+  # Скачивание официального установщика
+  wget -q https://raw.githubusercontent.com/FreePBX/sng_freepbx_debian_install/master/sng_freepbx_debian_install.sh \
+    -O freepbx17-install.sh
+  chmod +x freepbx17-install.sh
+
+  # Подмена зеркала, если выбрано альтернативное
+  if [[ -n "$SELECTED_MIRROR" ]]; then
+    patch_installer_mirror "$(pwd)/freepbx17-install.sh"
+  else
+    echo -e "${BYEL}Зеркало не выбрано — используется deb.freepbx.org по умолчанию.${NC}"
+    echo -e "${BYEL}Рекомендуется выбрать зеркало через пункт 14 меню.${NC}"
+    sleep 2
+  fi
+
+  # Запуск установщика; при ошибке — вызываем handle_install_failure
+  ./freepbx17-install.sh || handle_install_failure
+  # Снимаем перехват Ctrl+C, чтобы пользователь мог прервать постустановку
+  trap - INT
+  sleep $SLEEP_DELAY
+}
+
+
+# ===================================================================================
+# БЛОК ПОСТУСТАНОВКИ МОДУЛЕЙ
+# Обновляет модули FreePBX, устанавливает правильные права и перезагружает систему.
+# ===================================================================================
+
+
+postinstall_modules() {
+  # --- Обновление модулей ---
+  print_step "Обновление модулей FreePBX..."
+  fwconsole ma upgradeall \
+    || echo -e "${BYEL}Обновление модулей завершено с некоторыми предупреждениями. Продолжаем...${NC}"
+
+  # --- Установка владельцев файлов ---
+  print_step "Установка правильных владельцев файлов..."
+  fwconsole chown
+  echo
+  echo -e "Права собственности на файлы установлены. ${WHT}Можно продолжать.${NC}"
+  sleep $SLEEP_DELAY
+
+  # --- Перезагрузка FreePBX ---
+  # Иногда первая перезагрузка падает из-за гонки состояний — делаем до двух попыток
+  print_step "Перезагрузка FreePBX..."
+  if ! fwconsole reload; then
+    echo -e "${BRED}Первая попытка перезагрузки не удалась. Повторим через ${RELOAD_RETRY_DELAY_S} секунд...${NC}"
+    sleep "$RELOAD_RETRY_DELAY_S"
+    if ! fwconsole reload; then
+      echo -e "${BRED}Вторая попытка перезагрузки также не удалась. Продолжаем в любом случае...${NC}"
+    else
+      echo -e "Вторая попытка перезагрузки успешна. ${WHT}Можно продолжать.${NC}"
+    fi
+  else
+    echo -e "Модули обновлены, система перезагружена. ${WHT}Можно продолжать.${NC}"
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК НАСТРОЙКИ APACHE И ПРОВЕРКИ GUI
+# Настраивает Apache (модули, редирект) и проверяет, что
+# веб-интерфейс FreePBX отвечает корректно.
+# ===================================================================================
+
+
+IP_ADDR=""
+
+# --- Настройка Apache: модули, сайт, редирект ---
+apache_configure() {
+  a2enmod rewrite expires headers 2>/dev/null || true
+  a2ensite freepbx.conf 2>/dev/null || true
+  # Редирект корня сайта на /admin/, чтобы пользователь сразу попадал в FreePBX
+  if ! grep -q 'RedirectMatch' /etc/apache2/sites-enabled/000-default.conf 2>/dev/null; then
+    sed -i 's|DocumentRoot /var/www/html|DocumentRoot /var/www/html\n\tRedirectMatch ^/$ /admin/|' \
+      /etc/apache2/sites-enabled/000-default.conf
+    echo -e "Добавлен редирект корня на /admin/. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "Редирект корня уже настроен. ${WHT}Можно продолжать.${NC}"
+  fi
+  systemctl restart apache2
+}
+
+postinstall_apache() {
+  # --- Проверка статуса Apache ---
+  print_step "Проверка работы Apache..."
+  if systemctl is-active --quiet apache2; then
+    echo -e "Apache запущен. ${WHT}Можно продолжать.${NC}"
+  else
+    echo -e "${BRED}Apache не запущен. Проверьте статус службы вручную.${NC}"
+  fi
+  sleep $SLEEP_DELAY
+
+  # --- Настройка Apache и проверка веб-интерфейса ---
+  print_step "Настройка Apache и проверка веб-интерфейса FreePBX..."
+  IP_ADDR=$(hostname -I | awk '{print $1}')
+  apache_configure
+
+  # --- Проверка порта 80 ---
+  if ! nc -zv "$IP_ADDR" 80 2>&1 | grep -Eq 'open|succeeded'; then
+    echo -e "${BRED}Порт 80 на $IP_ADDR не открыт. Повторно применяем конфигурацию Apache...${NC}"
+    apache_configure
+  fi
+
+  # --- Проверка веб-интерфейса FreePBX ---
+  # Делаем до GUI_RETRY_MAX попыток с паузами.
+  # Ожидаем страницу с «Welcome to FreePBX».
+  local gui_ok=false
+  local retry=0
+  local http_body
+
+  while [ "$retry" -lt "$GUI_RETRY_MAX" ]; do
+    retry=$((retry + 1))
+    http_body=$(curl -s --max-time 10 "http://$IP_ADDR/admin/config.php")
+    if echo "$http_body" | grep -q 'Welcome to FreePBX'; then
+      echo -e "Страница настройки FreePBX подтверждена по адресу http://$IP_ADDR. ${WHT}Можно продолжать.${NC}"
+      gui_ok=true
+      break
+    elif echo "$http_body" | grep -q 'ionCube'; then
+      # ionCube Loader не работает — установка прошла некорректно
+      echo -e "${BRED}Обнаружена ошибка ionCube Loader. Установка FreePBX прошла некорректно.${NC}"
+      echo -e "${WHT}Это сбой установки FreePBX, а не проблема с Apache.${NC}"
+      handle_install_failure
+    elif echo "$http_body" | grep -q 'Apache2 Debian Default Page'; then
+      # Видна страница Apache по умолчанию — конфигурация не применилась
+      echo -e "${BRED}Обнаружена страница Apache по умолчанию вместо FreePBX. [$retry/$GUI_RETRY_MAX] Повторно применяем конфигурацию...${NC}"
+      apache_configure
+    else
+      echo -e "${BRED}Неожиданный ответ от http://$IP_ADDR. [$retry/$GUI_RETRY_MAX] Повторяем попытку...${NC}"
+    fi
+    if [ "$retry" -lt "$GUI_RETRY_MAX" ]; then
+      countdown "$GUI_RETRY_DELAY_S"
+    fi
+  done
+
+  # --- Если GUI так и не ответил — выводим диагностику ---
+  if [ "$gui_ok" = false ]; then
+    echo -e "${BRED}Веб-интерфейс FreePBX не ответил корректно после $GUI_RETRY_MAX попыток.${NC}"
+    echo -e "${WHT}Установка может быть незавершённой. Не продолжайте, пока проблема не будет решена.${NC}"
+    echo -e "${WHT}Проверьте Apache командой: ${BGRN}systemctl status apache2${NC}"
+    echo -e "${WHT}Проверьте FreePBX командой: ${BGRN}fwconsole sa${NC}"
+    echo
+    if [ "$IS_HEQET" = true ] || [ "$IS_NONINTERACTIVE" = true ]; then
+      echo -e "${BRED}Неинтерактивная установка: веб-интерфейс не запустился. Завершение работы.${NC}"
+      exit 1
+    fi
+    echo -e "${BYEL}Установка приостановлена. Нажмите Enter для выхода после диагностики.${NC}"
+    read -r
+    exit 1
+  fi
+  sleep $SLEEP_DELAY
+}
+
+
+# ===================================================================================
+# БЛОК ОЧИСТКИ
+# Удаляет логи, временные файлы, следы установщика и историю Bash.
+# Для ISO Heqet — удаляет служебные service-файлы.
+# ===================================================================================
+
+
+postinstall_cleanup() {
+  # --- Очистка логов Asterisk ---
+  print_step "Очистка логов Asterisk..."
+  rm -f /var/log/asterisk/full /var/log/asterisk/fail2ban /var/spool/mail/root
+  echo -e "Файлы full, fail2ban и почта root очищены. ${WHT}Можно продолжать.${NC}"
+  sleep $SLEEP_DELAY
+
+  # --- Удаление компонентов ISO Heqet ---
+  # Если запуск с Heqet ISO — удаляем служебные service-файлы
+  # и помечаем установку как завершённую
+  if [ "$IS_HEQET" = true ]; then
+    print_step "Обнаружен первый запуск с ISO. Выполняем очистку..."
+    touch /opt/fpbx-installer/.installed
+    echo -e "  - Установка помечена как завершённая"
+    echo
+
+    # Удаление службы firstboot при следующей загрузке
+    if [ -f /etc/systemd/system/fpbx-installer-firstboot.service ]; then
+      systemctl disable fpbx-installer-firstboot.service
+      cat <<'EOF' > /usr/local/bin/fpbx-final-cleanup.sh
+#!/bin/bash
+rm -f /etc/systemd/system/fpbx-installer-firstboot.service
+rm -f /usr/local/bin/fpbx-final-cleanup.sh
+EOF
+      chmod +x /usr/local/bin/fpbx-final-cleanup.sh
+      if ! grep -q fpbx-final-cleanup /etc/crontab; then
+        echo "@reboot root /usr/local/bin/fpbx-final-cleanup.sh" >> /etc/crontab
+      fi
+      echo -e "  - fpbx-installer-firstboot.service запланировано к удалению при следующей загрузке"
+      echo
+    fi
+
+    # Удаление службы cleanup при следующей загрузке
+    if [ -f /etc/systemd/system/fpbx-installer-cleanup.service ]; then
+      systemctl disable fpbx-installer-cleanup.service
+      cat <<'EOF' > /usr/local/bin/fpbx-cleanup-final.sh
+#!/bin/bash
+rm -f /etc/systemd/system/fpbx-installer-cleanup.service
+rm -f /usr/local/bin/fpbx-cleanup-final.sh
+EOF
+      chmod +x /usr/local/bin/fpbx-cleanup-final.sh
+      if ! grep -q fpbx-cleanup-final /etc/crontab; then
+        echo "@reboot root /usr/local/bin/fpbx-cleanup-final.sh" >> /etc/crontab
+      fi
+      echo -e "  - fpbx-installer-cleanup.service запланировано к удалению при следующей загрузке"
+      echo
+    fi
+
+    # Удаление файлов preseed
+    rm -f /root/preseed.cfg /etc/preseed.cfg /opt/fpbx-installer/preseed.cfg 2>/dev/null || true
+    echo -e "  - Файлы preseed очищены"
+    echo
+    echo -e "Очистка завершена. ${WHT}Можно продолжать.${NC}"
+    sleep $SLEEP_DELAY
+  fi
+
+  # --- Удаление хука переподключения к screen ---
+  rm -f /etc/profile.d/fpbx-reattach.sh
+
+  # --- Очистка истории Bash ---
+  print_step "Очистка истории Bash..."
+  unset HISTFILE; history -c 2>/dev/null || true
+  echo -e "История Bash очищена. ${WHT}Можно продолжать.${NC}"
+  sleep $SLEEP_DELAY
+
+  # --- Удаление следов установщика ---
+  print_step "Удаление следов установщика..."
+  if [ "$IS_HEQET" = true ]; then
+    echo "Обработано предустановкой ISO. Дополнительных действий не требуется."
+  fi
+  if [ "$IS_HEQET" = false ]; then
+    local script_path
+    script_path=$(realpath "$0")
+    echo "Попытка удалить файл скрипта: $script_path"
+    echo
+    if [[ -w "$script_path" ]]; then
+      if rm -- "$script_path"; then
+        echo "Скрипт успешно удалён."
+      else
+        echo "ВНИМАНИЕ: Не удалось удалить файл скрипта: $script_path"
+      fi
+    else
+      echo "ВНИМАНИЕ: Файл скрипта недоступен для записи. Пропуск удаления."
+    fi
+    echo
+    # Проверка, что файл действительно удалён
+    if find /tmp /usr/local/bin /root -name 'Freepbx17_debian12.sh' 2>/dev/null | grep -q .; then
+      echo -e "${BRED}ВНИМАНИЕ: скрипт всё ещё найден на диске. Удалите вручную.${NC}"
+    else
+      echo -e "Проверка… Удаление подтверждено. ${WHT}Можно продолжать.${NC}"
+    fi
+    echo
+    sleep 4
+  fi
+}
+
+
+# ===================================================================================
+# БЛОК ФИНАЛИЗАЦИИ
+# Выводит финальное сообщение и восстанавливает приглашение входа
+# на tty1 (для ISO Heqet).
+# ===================================================================================
+
+
+postinstall_finalize() {
+  # --- Сообщение для cloud-init (неинтерактивный режим без ISO) ---
+  if [ "$IS_HEQET" = false ] && [ "$IS_NONINTERACTIVE" = true ]; then
+    print_completion
+    sleep 4
+  fi
+
+  # --- Восстановление getty на tty1 (только для ISO Heqet) ---
+  # На Heqet ISO tty1 маскируется, чтобы показать вывод установки.
+  # После установки возвращаем обычное приглашение входа.
+  if [ "$IS_HEQET" = true ]; then
+    print_completion
+    sleep 4
+    echo -e "    Восстанавливается приглашение входа в систему..."
+    print_step "Восстановление приглашения входа на tty1..."
+    systemctl unmask getty@tty1.service
+    systemctl enable getty@tty1.service
+    systemctl restart getty@tty1.service
+  fi
+}
+
+
+# ===================================================================================
+# ИНТЕРАКТИВНОЕ МЕНЮ
+# Позволяет запускать отдельные шаги установки по выбору или
+# запустить полную установку.
+# ===================================================================================
+
+
+# --- Описание пунктов меню ---
+MENU_ITEMS=(
+  "1.  Предварительные проверки системы"
+  "2.  Проверка конфликтов (FreePBX/Asterisk/MariaDB/Node.js)"
+  "3.  Подготовка APT (источники, обновление, upgrade)"
+  "4.  Сетевые проверки (IP, iptables, DNS, порт 80)"
+  "5.  Проверка зеркал FreePBX"
+  "6.  Проверка доступности установщика"
+  "7.  Установка FreePBX 17"
+  "8.  Постустановка модулей (upgradeall, chown, reload)"
+  "9.  Настройка Apache и проверка GUI"
+  "10. Очистка (логи, следы, история)"
+  "11. Финализация"
+  "12. Запустить полную установку (все шаги по порядку)"
+  "13. Проверить статус установки"
+  "14. Выбор зеркала FreePBX (git.freepbx.asterisk.ru и др.)"
+  "15. Применить выбранное зеркало к существующей установке"
+  "0.  Выход"
+)
+
+# --- Маршрутизация пунктов меню к функциям ---
+run_menu_item() {
+  local choice="$1"
+  case "$choice" in
+    1)
+      print_step ">>> Запуск: Предварительные проверки системы"
+      preflight_system_checks
+      ;;
+    2)
+      print_step ">>> Запуск: Проверка конфликтов"
+      preflight_conflict_checks
+      ;;
+    3)
+      print_step ">>> Запуск: Подготовка APT"
+      preflight_apt_prepare
+      ;;
+    4)
+      print_step ">>> Запуск: Сетевые проверки"
+      preflight_network_checks
+      ;;
+    5)
+      print_step ">>> Запуск: Проверка зеркал FreePBX"
+      MIRROR_OK=false
+      MIRROR_GOOD_COUNT=0
+      preflight_mirror_checks
+      ;;
+    6)
+      print_step ">>> Запуск: Проверка доступности установщика"
+      preflight_installer_checks
+      ;;
+    7)
+      print_step ">>> Запуск: Установка FreePBX 17"
+      install_freepbx
+      ;;
+    8)
+      print_step ">>> Запуск: Постустановка модулей"
+      postinstall_modules
+      ;;
+    9)
+      print_step ">>> Запуск: Настройка Apache и проверка GUI"
+      postinstall_apache
+      ;;
+    10)
+      print_step ">>> Запуск: Очистка"
+      postinstall_cleanup
+      ;;
+    11)
+      print_step ">>> Запуск: Финализация"
+      postinstall_finalize
+      ;;
+    12)
+      print_step ">>> Запуск полной установки (все шаги по порядку)"
+      run_full_install
+      ;;
+    13)
+      print_step ">>> Проверка статуса установки"
+      check_install_status
+      ;;
+    14)
+      print_step ">>> Выбор зеркала FreePBX"
+      select_mirror
+      ;;
+    15)
+      print_step ">>> Применение зеркала к существующей установке"
+      apply_mirror_existing
+      ;;
+    0)
+      echo -e "${CYAN}До свидания.${NC}"
+      exit 0
+      ;;
+    *)
+      echo -e "${BRED}Неверный выбор: $choice${NC}"
+      ;;
+  esac
+}
+
+# --- Запуск полной установки (все шаги по порядку) ---
+# Если зеркало не выбрано — по умолчанию используется первое из массива MIRRORS
+run_full_install() {
+  if [[ -z "$SELECTED_MIRROR" ]]; then
+    local name url gpg
+    IFS='|' read -r name url gpg <<< "${MIRRORS[0]}"
+    SELECTED_MIRROR_NAME="$name"
+    SELECTED_MIRROR="$url"
+    SELECTED_MIRROR_GPG="$gpg"
+    echo -e "${BYEL}Зеркало по умолчанию: $name${NC}"
+  fi
+
+  # Последовательность шагов полной установки
+  local steps=(1 2 3 4 5 6 7 8 9 10 11)
+  local total=${#steps[@]}
+  local current=0
+
+  for step in "${steps[@]}"; do
+    current=$((current + 1))
+    echo
+    echo -e "${BMAG}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BMAG}  Шаг $current из $total ${NC}"
+    echo -e "${BMAG}═══════════════════════════════════════════════════════════${NC}"
+    run_menu_item "$step"
+  done
+
+  echo
+  echo -e "${BGRN}Полная установка завершена.${NC}"
+  echo
+  print_completion
+}
+
+
+# ===================================================================================
+# ПРОВЕРКА СТАТУСА УСТАНОВКИ
+# Выводит сводную таблицу состояния всех компонентов FreePBX.
+# ===================================================================================
+
+
+check_install_status() {
+  echo
+  echo -e "${BMAG}═══════════════════════════════════════════════════════════${NC}"
+  echo -e "${BMAG}  ПРОВЕРКА СТАТУСА УСТАНОВКИ${NC}"
+  echo -e "${BMAG}═══════════════════════════════════════════════════════════${NC}"
+  echo
+
+  # --- FreePBX ---
+  echo -ne "  FreePBX:           "
+  if [[ -f /etc/freepbx.conf || -d /var/www/html/admin ]]; then
+    echo -e "${BGRN}установлен${NC}"
+  else
+    echo -e "${BRED}не найден${NC}"
+  fi
+
+  # --- Asterisk ---
+  echo -ne "  Asterisk:          "
+  if command -v asterisk >/dev/null 2>&1; then
+    local ast_ver
+    ast_ver=$(asterisk -V 2>/dev/null || echo "версия недоступна")
+    echo -e "${BGRN}$ast_ver${NC}"
+  else
+    echo -e "${BRED}не установлен${NC}"
+  fi
+
+  # --- MariaDB ---
+  echo -ne "  MariaDB:           "
+  if systemctl is-active --quiet mariadb 2>/dev/null; then
+    echo -e "${BGRN}запущена${NC}"
+  elif command -v mariadbd >/dev/null 2>&1; then
+    echo -e "${BYEL}установлена, но не запущена${NC}"
+  else
+    echo -e "${BRED}не установлена${NC}"
+  fi
+
+  # --- Apache ---
+  echo -ne "  Apache:            "
+  if systemctl is-active --quiet apache2 2>/dev/null; then
+    echo -e "${BGRN}запущен${NC}"
+  elif command -v apache2 >/dev/null 2>&1; then
+    echo -e "${BYEL}установлен, но не запущен${NC}"
+  else
+    echo -e "${BRED}не установлен${NC}"
+  fi
+
+  # --- Node.js ---
+  echo -ne "  Node.js:           "
+  if command -v node >/dev/null 2>&1; then
+    echo -e "${BGRN}$(node -v 2>/dev/null)${NC}"
+  else
+    echo -e "${BRED}не установлен${NC}"
+  fi
+
+  # --- fwconsole ---
+  echo -ne "  fwconsole:         "
+  if command -v fwconsole >/dev/null 2>&1; then
+    echo -e "${BGRN}доступен${NC}"
+  else
+    echo -e "${BRED}не найден${NC}"
+  fi
+
+  # --- ionCube Loader ---
+  echo -ne "  ionCube Loader:    "
+  if command -v php >/dev/null 2>&1; then
+    local ioncube_info
+    ioncube_info=$(php -m 2>/dev/null | grep -i '^ionCube' | head -1)
+    if [[ -n "$ioncube_info" ]]; then
+      local ioncube_ver
+      ioncube_ver=$(php -r 'if (function_exists("ioncube_loader_version")) { echo ioncube_loader_version(); }' 2>/dev/null || echo "")
+      if [[ -n "$ioncube_ver" ]]; then
+        echo -e "${BGRN}$ioncube_info — v$ioncube_ver${NC}"
+      else
+        echo -e "${BGRN}$ioncube_info${NC}"
+      fi
+    else
+      echo -e "${BRED}не загружен (FreePBX не будет работать)${NC}"
+    fi
+  else
+    echo -e "${BRED}PHP не установлен${NC}"
+  fi
+
+  # --- Порт 80 ---
+  echo -ne "  Порт 80:           "
+  if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+    local port80_proc
+    port80_proc=$(ss -tlnp 2>/dev/null | grep ':80 ' | awk -F'"' '{print $2}' | sort -u | head -1)
+    echo -e "${BGRN}слушается ($port80_proc)${NC}"
+  else
+    echo -e "${BRED}не слушается${NC}"
+  fi
+
+  # --- Веб-интерфейс FreePBX ---
+  echo -ne "  FreePBX GUI:       "
+  local ip
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  if [[ -n "$ip" ]]; then
+    local http_check
+    http_check=$(curl -s --max-time 5 "http://$ip/admin/config.php" 2>/dev/null)
+    if echo "$http_check" | grep -q 'Welcome to FreePBX'; then
+      echo -e "${BGRN}доступна (http://$ip/admin)${NC}"
+    elif echo "$http_check" | grep -q 'ionCube'; then
+      echo -e "${BRED}ошибка ionCube Loader${NC}"
+    elif [[ -n "$http_check" ]]; then
+      echo -e "${BYEL}отвечает, но содержимое не распознано${NC}"
+    else
+      echo -e "${BRED}не отвечает${NC}"
+    fi
+  else
+    echo -e "${BRED}IP не определён${NC}"
+  fi
+
+  # --- Текущее зеркало FreePBX (из файла) ---
+  echo -ne "  Зеркало FreePBX:   "
+  local freepbx_list="/etc/apt/sources.list.d/freepbx.list"
+  if [[ -f "$freepbx_list" ]]; then
+    local mirror_url
+    mirror_url=$(grep -oE 'https?://[^ "]+' "$freepbx_list" | head -1)
+    if [[ -n "$mirror_url" ]]; then
+      echo -e "${BGRN}$mirror_url${NC}"
+    else
+      echo -e "${BYEL}найден, но URL не распознан${NC}"
+    fi
+  else
+    echo -e "${BRED}freepbx.list не найден${NC}"
+  fi
+
+  # --- Зеркало, выбранное в меню ---
+  echo -ne "  Выбрано в меню:    "
+  if [[ -n "$SELECTED_MIRROR" ]]; then
+    echo -e "${BGRN}$SELECTED_MIRROR_NAME${NC}"
+  else
+    echo -e "${BYEL}не выбрано${NC}"
+  fi
+
+  # --- Свободное место на диске ---
+  echo -ne "  Свободно на /:     "
+  local avail_kb
+  avail_kb=$(df / | tail -1 | awk '{print $4}')
+  echo -e "${WHT}$(awk "BEGIN {printf \"%.2f\", $avail_kb/1024/1024}") ГБ${NC}"
+
+  # --- Память ---
+  echo -ne "  RAM / Swap:        "
+  local mem_mb swap_mb
+  mem_mb=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024))
+  swap_mb=$(($(grep SwapTotal /proc/meminfo | awk '{print $2}') / 1024))
+  echo -e "${WHT}${mem_mb} МБ / ${swap_mb} МБ${NC}"
+
+  echo
+  echo -e "${BMAG}═══════════════════════════════════════════════════════════${NC}"
+  echo
+
+  # Пауза перед возвратом в меню (только в интерактивном режиме)
+  if [ "$IS_NONINTERACTIVE" = false ] && [ "$MENU_MODE" = true ]; then
+    read -r -p "$(echo -e "${BYEL}  Нажмите Enter для возврата в меню...${NC}")"
+  fi
+}
+
+# --- Отрисовка главного меню ---
+# Цикл с отображением списка пунктов и маршрутизацией выбора.
+show_menu() {
+  while true; do
+    echo
+    echo -e "${BMAG}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BMAG}║         Скрипт ${VERSION} — Меню установки FreePBX 17      ║${NC}"
+    echo -e "${BMAG}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo
+
+    # Показ выбранного зеркала в шапке меню
+    if [[ -n "$SELECTED_MIRROR" ]]; then
+      echo -e "  ${BGRN}Зеркало:${NC} $SELECTED_MIRROR_NAME"
+    else
+      echo -e "  ${BYEL}Зеркало:${NC} не выбрано (пункт 14)"
+    fi
+    echo
+
+    for item in "${MENU_ITEMS[@]}"; do
+      echo -e "  ${WHT}$item${NC}"
+    done
+    echo
+    echo -e "${BYEL}  Любой пункт можно запускать повторно для проверки.${NC}"
+    echo
+    printf "${BYEL}  Выберите пункт [0-15]: ${NC}"
+    read -r menu_choice
+
+    if [[ -z "$menu_choice" ]]; then
+      echo -e "${BRED}  Пустой ввод. Введите число от 0 до 15.${NC}"
+      continue
+    fi
+
+    run_menu_item "$menu_choice"
+
+    # После выполнения пункта (кроме выхода) — возвращаемся в меню
+    if [[ "$menu_choice" != "0" ]]; then
+      echo
+      echo -e "${BYEL}  ──────────────────────────────────────────${NC}"
+      echo -e "${BGRN}  Шаг завершён. Возвращаемся в меню...${NC}"
+      echo -e "${BYEL}  ──────────────────────────────────────────${NC}"
+      sleep 2
+    fi
+  done
+}
 
 
 #####################################################################################
-#     Проверка после установки (POST INSTALL VALIDATION)
+#       ОСНОВНОЙ ХОД ВЫПОЛНЕНИЯ 
 #####################################################################################
-# -----------------------------------------------------------------------------------
-# Команды для проверки корректности установки после её завершения
-# Отключаем автоматическое прерывание скрипта при получении ненулевого кода возврата от команд
-# Это нужно, чтобы скрипт не остановился на первой же ошибке проверки, а выполнил все тесты
-# -----------------------------------------------------------------------------------
-set +e
 
-# -----------------------------------------------------------------------------------
-# Шаг 19 - Проверка после установки
-# -----------------------------------------------------------------------------------
-setCurrentStep "Post-installation validation"
 
-# Проверяем, что все необходимые службы (FreePBX, Asterisk, Apache и т.д.) запущены и работают корректно
-check_services
-
-# Проверяем версию PHP — она должна соответствовать требованиям FreePBX 17
-check_php_version
-
-# (Опция --nofreepbx). Если не была указана — выполняем дополнительную проверку самого FreePBX 
-# (доступность API, основных модулей и т. п.)
-if [ ! "$nofpbx" ] ; then
- check_freepbx
+# --- Режим меню (--menu) ---
+if [ "$MENU_MODE" = true ]; then
+  show_menu
+  exit 0
 fi
 
-# Проверяем состояние и работоспособность Asterisk (запущен ли, нет ли критических ошибок в логах и т.п.)
-check_asterisk
-
-# Вычисляем общее время выполнения всего скрипта установки
-execution_time="$(($(date +%s) - start))"
-message "Total script Execution Time: $execution_time"
-message "Finished FreePBX 17 installation process for $host $kernel"
-message "Join us on the FreePBX Community Forum: https://community.freepbx.org/ ";
-
-# (Опция --nofreepbx). Если FreePBX был установлен — 
-# выводим приветственное сообщение motd (Message of the Day) через fwconsole
-if [ ! "$nofpbx" ] ; then
-  fwconsole motd
+# --- Режим полной установки (--full) ---
+if [ "$RUN_FULL" = true ]; then
+  run_full_install
+  exit 0
 fi
+
+# --- Стандартный режим: предустановочные проверки → установка ---
+if [ "$SKIP_CHECKS" = false ]; then
+  preflight_system_checks           # Проверка ОС, диска, памяти, архитектуры
+  preflight_conflict_checks         # Проверка отсутствия конфликтующих установок
+  preflight_apt_prepare             # Подготовка APT: источники, update, upgrade
+  preflight_network_checks          # Сетевые проверки: IP, DNS, порты
+  preflight_mirror_checks           # Проверка зеркал FreePBX
+  preflight_installer_checks        # Проверка доступности установщика
+  launch_in_screen "$@"             # Перезапуск в screen для устойчивости
+  SKIP_CHECKS=true
+fi
+
+# --- Установка (внутри screen, если применимо) ---
+if [ "$SKIP_CHECKS" = true ]; then
+  echo
+  echo -e "${BGRN}Предварительные проверки завершены. Подготовка к запуску, пристегните ремни.${NC}"
+  sleep 4
+  echo
+
+  # Перехват Ctrl+C — вызываем обработчик сбоя
+  trap 'handle_install_failure' INT
+
+  install_freepbx                  # Скачивание и запуск официального установщика
+  postinstall_modules              # Обновление модулей, права, перезагрузка
+  postinstall_apache               # Настройка Apache и проверка веб-интерфейса
+  postinstall_cleanup              # Очистка логов, временных файлов, истории
+  postinstall_finalize             # Финальное сообщение, восстановление tty1
+fi
+
+exit 0
